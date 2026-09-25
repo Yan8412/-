@@ -19,31 +19,93 @@ def _client(tmp_path, transport, **kwargs):
     )
 
 
+# Shape observed on GET /fixtures page 1: next_cursor is a full URL.
+_CURSOR = "WzEsNTAsWzE5NzMyNDEyXSxbWyJzcG9ydHMuZml4dHVyZXMuaWQiLDBdXV0"
+_CURSOR_2 = "WzIsNTAsWzE5NzMyNDEzXV0"
+
+
+def _cursor_url(token: str) -> str:
+    return (
+        "https://api.sportmonks.com/v3/football/fixtures"
+        "?filters=fixtureSeasons%3A27965&include=participants%3Bscores%3Bstate%3Bround%3Bseason"
+        f"&cursor={token}"
+    )
+
+
+def _reject_bad_cursor(params: dict) -> tuple[int, dict, dict] | None:
+    cursor = params.get("cursor")
+    if not cursor:
+        return None
+    if "per_page" in params:
+        return 400, {}, {
+            "message": (
+                "The per_page parameter cannot be used together with cursor; "
+                "start a new request without a cursor to change the page size."
+            )
+        }
+    if "://" in str(cursor):
+        return 400, {}, {"message": "The cursor parameter is invalid."}
+    return None
+
+
 def test_cursor_pagination_and_cache_omits_token(tmp_path):
     calls = []
 
     def transport(url, params):
         calls.append((url, dict(params)))
-        if "cursor" not in params:
+        rejected = _reject_bad_cursor(params)
+        if rejected:
+            return rejected
+        cursor = params.get("cursor")
+        if cursor is None:
             body = {
                 "data": [{"id": 1, "league_id": 564}, {"id": 2, "league_id": 564}],
-                "pagination": {"has_more": True, "next_cursor": "abc", "per_page": 50, "count": 2},
+                "pagination": {
+                    "count": 50,
+                    "per_page": 50,
+                    "has_more": True,
+                    "current_page": 1,
+                    "next_page": (
+                        "https://api.sportmonks.com/v3/football/fixtures"
+                        "?filters=fixtureSeasons%3A27965&per_page=50&page=2"
+                    ),
+                    "next_cursor": _cursor_url(_CURSOR),
+                },
                 "rate_limit": {"remaining": 100, "resets_in_seconds": 3600, "requested_entity": "Fixture"},
             }
-        else:
+        elif cursor == _CURSOR:
+            # Cursor pages omit current_page and next_page.
             body = {
                 "data": [{"id": 3, "league_id": 564}],
-                "pagination": {"has_more": False, "next_cursor": None},
+                "pagination": {
+                    "count": 50,
+                    "per_page": 50,
+                    "has_more": True,
+                    "next_cursor": _cursor_url(_CURSOR_2),
+                },
                 "rate_limit": {"remaining": 99, "resets_in_seconds": 3590},
             }
+        elif cursor == _CURSOR_2:
+            body = {
+                "data": [{"id": 4, "league_id": 564}],
+                "pagination": {"count": 10, "per_page": 50, "has_more": False, "next_cursor": None},
+                "rate_limit": {"remaining": 98, "resets_in_seconds": 3580},
+            }
+        else:
+            return 400, {}, {"message": "The cursor parameter is invalid."}
         return 200, {}, body
 
     client = _client(tmp_path, transport)
     rows = list(client.paginate("fixtures", {"include": "participants;scores", "filters": "fixtureSeasons:1"}))
-    assert [row["id"] for row in rows] == [1, 2, 3]
-    assert calls[1][1]["cursor"] == "abc"
+    assert [row["id"] for row in rows] == [1, 2, 3, 4]
+    assert calls[1][1]["cursor"] == _CURSOR
+    assert calls[2][1]["cursor"] == _CURSOR_2
+    assert "per_page" not in calls[1][1]
+    assert "per_page" not in calls[2][1]
+    assert calls[1][1]["filters"] == "fixtureSeasons:1"
     assert calls[1][1]["api_token"] == "client-token"
     assert all("api_token" not in call[0] for call in calls)
+    assert len(calls) == 3
 
     cached = list(tmp_path.glob("*.json"))
     assert cached
@@ -52,7 +114,7 @@ def test_cursor_pagination_and_cache_omits_token(tmp_path):
 
     calls.clear()
     again = list(client.paginate("fixtures", {"include": "participants;scores", "filters": "fixtureSeasons:1"}))
-    assert [row["id"] for row in again] == [1, 2, 3]
+    assert [row["id"] for row in again] == [1, 2, 3, 4]
     assert calls == []
 
 
@@ -144,13 +206,83 @@ def test_missing_token_and_error_redaction(tmp_path):
 def test_advance_pagination_prefers_cursor():
     path, params = advance_pagination(
         "fixtures",
-        {"include": "scores", "per_page": "50"},
-        {"has_more": True, "next_cursor": "xyz", "next_page": "https://example.test?page=2&api_token=nope"},
+        {"include": "scores", "per_page": "50", "filters": "fixtureSeasons:27965"},
+        {
+            "count": 50,
+            "per_page": 50,
+            "has_more": True,
+            "current_page": 1,
+            "next_page": "https://api.sportmonks.com/v3/football/fixtures?page=2&per_page=50&api_token=nope",
+            "next_cursor": _cursor_url(_CURSOR),
+        },
     )
     assert path == "fixtures"
-    assert params["cursor"] == "xyz"
+    assert params["cursor"] == _CURSOR
+    assert "per_page" not in params
     assert "page" not in params
     assert "api_token" not in params
+    assert params["filters"] == "fixtureSeasons:27965"
+
+
+def test_advance_pagination_ignores_cursor_page_fields_when_has_more_is_false():
+    """A cursor page has per_page and no next_page. has_more false must not invent page=2."""
+
+    step = advance_pagination(
+        "fixtures",
+        {"include": "scores", "per_page": "50"},
+        {"count": 10, "per_page": 50, "has_more": False, "next_cursor": None},
+    )
+    assert step is None
+
+
+def test_mock_cursor_url_is_rejected_when_forwarded_whole(tmp_path, monkeypatch):
+    import requests
+
+    from laliga.data.client import open_client
+    from tests.mock_sportmonks import MockSportMonks
+
+    mock = MockSportMonks()
+    monkeypatch.setenv("SPORTMONKS_API_TOKEN", "probe-token")
+    monkeypatch.setenv("SPORTMONKS_API_BASE", mock.base_url)
+    try:
+        whole = _cursor_url(_CURSOR)
+        bad_url = requests.get(
+            f"{mock.base_url}/fixtures",
+            params={"api_token": "probe-token", "filters": "fixtureSeasons:9001", "cursor": whole},
+            timeout=5,
+        )
+        assert bad_url.status_code == 400
+        assert "invalid" in bad_url.json()["message"].lower()
+        bad_pair = requests.get(
+            f"{mock.base_url}/fixtures",
+            params={"api_token": "probe-token", "filters": "fixtureSeasons:9001", "cursor": "c50", "per_page": 50},
+            timeout=5,
+        )
+        assert bad_pair.status_code == 400
+        assert "per_page" in bad_pair.json()["message"]
+
+        before = len(mock.hits)
+        client = open_client(tmp_path, min_interval=0)
+        season_rows = list(
+            client.paginate(
+                "fixtures",
+                {"filters": "fixtureSeasons:9001", "include": "participants;scores", "per_page": 50},
+            )
+        )
+        between_rows = list(
+            client.paginate(
+                "fixtures/between/2020-01-01/2030-01-01",
+                {"filters": "fixtureLeagues:564", "include": "participants", "per_page": 50},
+            )
+        )
+        assert len(season_rows) > 50
+        assert len(between_rows) > 50
+        followed = [hit for hit in mock.hits[before:] if "cursor=" in hit]
+        assert len(followed) >= 2
+        assert all("per_page=" not in hit for hit in followed)
+        assert all("cursor=https" not in hit and "cursor=http" not in hit for hit in followed)
+    finally:
+        mock.close()
 
 
 def test_date_windows_respect_100_day_limit():

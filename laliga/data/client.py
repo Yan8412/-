@@ -8,9 +8,14 @@ Documented behaviour this client relies on
 * Includes are semicolon-separated (``include=participants;scores``).
 * Filters are ``key:value`` and combined with ``;`` (``filters=fixtureLeagues:564``).
 * List payloads are ``{"data": [...], "pagination": {...}}``.
-* Pagination is cursor-based (``next_cursor`` + ``has_more``). The older
-  ``page`` / ``next_page`` style still works and is followed when no cursor
-  is present. ``per_page`` max is 50.
+* Pagination is cursor-based (``next_cursor`` + ``has_more``). On the real
+  API ``next_cursor`` is a full URL; the bare ``cursor`` query value is
+  what the next request must send, and ``per_page`` must be omitted
+  (combining them is HTTP 400, as is passing the whole URL as ``cursor``).
+  Cursor pages often contain only ``count``, ``per_page``, ``has_more``
+  and ``next_cursor``. Stop when ``has_more`` is false. The older
+  ``page`` / ``next_page`` style still works and is followed when no
+  cursor is present. ``per_page`` max is 50.
 * Each page counts as one request. The body may include
   ``rate_limit.remaining`` and ``rate_limit.resets_in_seconds``. HTTP 429
   is backed off using ``Retry-After`` or that reset hint.
@@ -314,15 +319,21 @@ def advance_pagination(
 ) -> tuple[str, dict[str, str]] | None:
     """Choose the next request from a SportMonks ``pagination`` object.
 
-    Preference order: ``next_cursor``, then ``next_page`` (token stripped),
-    then ``current_page + 1``.
+    Preference order: the bare token inside ``next_cursor`` (a full URL on
+    the real API), then ``next_page`` (token stripped), then
+    ``current_page + 1``. A cursor request drops ``per_page``; the API
+    rejects that pair with HTTP 400.
     """
 
-    cursor = pagination.get("next_cursor")
-    if cursor:
+    if pagination.get("has_more") is False:
+        return None
+
+    token = _cursor_token(pagination.get("next_cursor"))
+    if token:
         params = dict(original)
         params.pop("page", None)
-        params["cursor"] = str(cursor)
+        params.pop("per_page", None)
+        params["cursor"] = token
         return path, params
 
     next_page = pagination.get("next_page")
@@ -341,6 +352,29 @@ def advance_pagination(
     return None
 
 
+def _cursor_token(value: Any) -> str | None:
+    """Return the bare cursor token from a SportMonks ``next_cursor`` value.
+
+    The live API sets ``next_cursor`` to a full fixtures URL. Sending that
+    URL back as ``cursor`` is HTTP 400 ("The cursor parameter is invalid").
+    A bare token, if one is ever returned, is kept as-is.
+    """
+
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text or text.lower() == "null":
+        return None
+    if "://" in text or text.startswith("?") or "cursor=" in text:
+        parsed = urllib.parse.urlparse(text)
+        values = urllib.parse.parse_qs(parsed.query).get("cursor") or []
+        token = values[0].strip() if values else ""
+        if not token or "://" in token:
+            return None
+        return token
+    return text
+
+
 def _merge_next_page(
     fallback_path: str, original: dict[str, str], next_page: str
 ) -> tuple[str, dict[str, str]]:
@@ -352,6 +386,8 @@ def _merge_next_page(
     params.pop("api_token", None)
     if "cursor" in overlay:
         params.pop("page", None)
+        params.pop("per_page", None)
+        params["cursor"] = _cursor_token(params.get("cursor")) or params["cursor"]
     if "page" in overlay:
         params.pop("cursor", None)
     url_path = parsed.path

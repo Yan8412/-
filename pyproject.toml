@@ -10,11 +10,11 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "flask==3.1.2",
-    "numpy==2.2.6",
-    "pandas==2.2.3",
+    "numpy==2.4.6",
+    "pandas==2.3.3",
     "python-dotenv==1.1.1",
     "requests==2.32.5",
-    "scipy==1.15.3",
+    "scipy==1.17.1",
 ]
 
 [project.optional-dependencies]

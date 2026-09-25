@@ -11,7 +11,7 @@ import json
 import threading
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from laliga.config import LA_LIGA_LEAGUE_ID
 from laliga.synthetic import generate_synthetic_fixtures
@@ -66,6 +66,9 @@ class MockSportMonks:
             )
         if not token:
             return 401, {}, {"message": "Unauthorized"}
+        rejected = _cursor_request_error(parse_qs(urlparse(path).query))
+        if rejected:
+            return 400, {}, rejected
         return 200, {}, self._ok_body(path)
 
     def _ok_body(self, path: str) -> dict:
@@ -83,7 +86,7 @@ class MockSportMonks:
         if relative == "fixtures":
             season_id = _filter_value(query, "fixtureSeasons")
             rows = [item for item in self.fixtures if str(item["season_id"]) == season_id]
-            return _page(rows, query)
+            return _page(rows, query, path)
         if relative.startswith("fixtures/between/"):
             parts = relative.split("/")
             start, end = parts[-2], parts[-1]
@@ -95,7 +98,7 @@ class MockSportMonks:
                 day = str(item["starting_at"])[:10]
                 if start <= day <= end:
                     rows.append(item)
-            return _page(rows, query)
+            return _page(rows, query, path)
         return {"message": f"no result for {relative}"}
 
 
@@ -127,28 +130,71 @@ def _envelope(data) -> dict:
     return {"data": data, "rate_limit": {"remaining": 2500, "resets_in_seconds": 3600}}
 
 
-def _page(rows: list, query: dict[str, list[str]]) -> dict:
-    try:
-        per_page = int((query.get("per_page") or [str(PER_PAGE_DEFAULT)])[0])
-    except ValueError:
+def _cursor_request_error(query: dict[str, list[str]]) -> dict | None:
+    """Match the live API: per_page+cursor and a URL-valued cursor are HTTP 400."""
+
+    cursor = (query.get("cursor") or [""])[0]
+    if not cursor:
+        return None
+    if "per_page" in query:
+        return {
+            "message": (
+                "The per_page parameter cannot be used together with cursor; "
+                "start a new request without a cursor to change the page size."
+            )
+        }
+    if "://" in cursor or not (cursor.startswith("c") and cursor[1:].isdigit()):
+        return {"message": "The cursor parameter is invalid."}
+    return None
+
+
+def _page(rows: list, query: dict[str, list[str]], request_path: str) -> dict:
+    cursor = (query.get("cursor") or [""])[0]
+    using_cursor = bool(cursor)
+    if using_cursor:
         per_page = PER_PAGE_DEFAULT
-    per_page = max(1, min(per_page, 50))
-    try:
-        offset = int((query.get("cursor") or ["0"])[0])
-    except ValueError:
-        offset = 0
+        offset = int(cursor[1:])
+        page_number = None
+    else:
+        try:
+            per_page = int((query.get("per_page") or [str(PER_PAGE_DEFAULT)])[0])
+        except ValueError:
+            per_page = PER_PAGE_DEFAULT
+        per_page = max(1, min(per_page, 50))
+        try:
+            page_number = int((query.get("page") or ["1"])[0])
+        except ValueError:
+            page_number = 1
+        offset = max(0, (page_number - 1) * per_page)
     chunk = rows[offset : offset + per_page]
     nxt = offset + per_page
     has_more = nxt < len(rows)
-    pagination = {
+    pagination: dict = {
         "count": len(chunk),
         "per_page": per_page,
-        "current_page": None,
-        "next_page": None,
         "has_more": has_more,
-        "next_cursor": str(nxt) if has_more else None,
     }
+    if has_more:
+        pagination["next_cursor"] = _sportmonks_url(request_path, cursor=f"c{nxt}")
+    else:
+        pagination["next_cursor"] = None
+    if not using_cursor:
+        pagination["current_page"] = page_number
+        pagination["next_page"] = _sportmonks_url(request_path, per_page=per_page, page=(page_number or 1) + 1) if has_more else None
     return {"data": chunk, "pagination": pagination, "rate_limit": {"remaining": 2500, "resets_in_seconds": 3600}}
+
+
+def _sportmonks_url(request_path: str, **extra: object) -> str:
+    """Build a next_cursor / next_page URL in the shape the live API returns."""
+
+    parsed = urlparse(request_path)
+    query = dict(parse_qs(parsed.query, keep_blank_values=False))
+    flat = {key: values[0] for key, values in query.items() if values and key != "api_token"}
+    for key in ("page", "cursor", "per_page"):
+        flat.pop(key, None)
+    for key, value in extra.items():
+        flat[key] = str(value)
+    return urlunparse(("https", "api.sportmonks.com", parsed.path, "", urlencode(flat), ""))
 
 
 def _filter_value(query: dict[str, list[str]], key: str) -> str:
