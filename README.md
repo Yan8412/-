@@ -43,7 +43,7 @@
 
 程序会：
 
-1. `GET /leagues/564?include=seasons;currentSeason`，按 `starting_at` 取最近若干个赛季（默认 6 个，含当前赛季）
+1. `GET /leagues/564?include=seasons;currentSeason`，按 `starting_at` 取最近若干个赛季（默认 3 个，含当前赛季）。很多订阅（包括用来核对过这个程序的那一份）只能列出 2024/2025 及以后的三个赛季；接口列出更少时按实际数量抓取，不会因为填写的数字更大而失败
 2. `GET /fixtures?filters=fixtureSeasons:{赛季ID}&include=participants;scores;state;round;season`，用游标把该赛季拉完。真实接口的 `next_cursor` 是一条完整 URL，程序只取出里面的 `cursor` 值，并且翻页时不再带 `per_page`（两个一起送会 HTTP 400；把整段 URL 当作 cursor 也会 400）。游标页往往只有 `has_more` 和 `next_cursor`，`has_more` 为 false 就停止。没有游标时跟随 `next_page`，再退回页码
 3. 预测某一段日期时，用 `GET /fixtures/between/{开始}/{结束}?filters=fixtureLeagues:564`。这个接口单次最长 100 天，更长的区间会自动拆开
 
@@ -95,7 +95,7 @@ python -m laliga web
 
 | 按钮 | 作用 |
 | --- | --- |
-| 更新数据 | 向 SportMonks 拉取最近若干个赛季（默认 6），写入本地缓存 |
+| 更新数据 | 向 SportMonks 拉取最近若干个赛季（默认 3；接口列出更少就抓那么多），写入本地缓存 |
 | 训练模型 | 用本地全部完场比赛拟合，并保存模型 |
 | 运行回测 | 按日期走步，和历史频率基准比较。默认最少训练场次是 320；比赛不够时改小这个数字再运行 |
 | 预测下一轮 | 预测最近一轮未开赛比赛 |
@@ -146,14 +146,14 @@ python -m laliga demo
 ### 抓取 / 更新数据
 
 ```bash
-python -m laliga fetch --seasons 6
+python -m laliga fetch --seasons 3
 ```
 
 再次运行会走缓存，并把新抓到的比赛按 `fixture_id` 合并进 `data/processed/matches.csv`。
 
 ```bash
-python -m laliga fetch --seasons 6 --refresh    # 忽略原始响应缓存，重新请求
-python -m laliga fetch --seasons 6 --replace    # 用本次结果覆盖本地比赛表
+python -m laliga fetch --seasons 3 --refresh    # 忽略原始响应缓存，重新请求
+python -m laliga fetch --seasons 3 --replace    # 用本次结果覆盖本地比赛表
 ```
 
 ### 训练
@@ -261,7 +261,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 # 在 .env 中设置 SPORTMONKS_API_TOKEN
-python -m laliga fetch --seasons 6
+python -m laliga fetch --seasons 3
 python -m laliga backtest --output data/predictions/backtest.json
 python -m laliga train
 python -m laliga predict --next

@@ -6,7 +6,7 @@
   {% if not items %}
   <p class="empty">还没有预测。回到操作台，在本地已有未开赛比赛后点击「预测下一轮」或「按日期预测」。没有缓存时这里保持空白，不会显示示例比赛。</p>
   {% else %}
-  <p class="muted">{{ payload.label }}。生成于 {{ payload.created_at }}。{% if payload.note %}{{ payload.note }}{% endif %}</p>
+  <p class="muted">{{ payload.label }}。生成于 {{ created_label }}。{% if payload.note %}{{ payload.note }}{% endif %}</p>
   <p>
     <a href="{{ url_for('download_predictions_csv') }}">下载预测 CSV</a>
     ·

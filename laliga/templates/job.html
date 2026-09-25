@@ -2,7 +2,7 @@
 {% block title %}{{ job.title }}{% endblock %}
 {% block body %}
 <section class="panel">
-  <h2>{{ job.title }}</h2>
+  <h2 id="job-title">{{ job.title }}</h2>
   <pre class="log" id="log">{{ job.lines | join('\n') }}</pre>
   <div id="outcome">
     {% if job.done and job.ok %}
@@ -24,6 +24,10 @@ async function tick() {
   if (!response.ok) return;
   const job = await response.json();
   document.getElementById("log").textContent = (job.lines || []).join("\n");
+  if (job.title) {
+    document.getElementById("job-title").textContent = job.title;
+    document.title = job.title;
+  }
   if (!job.done) {
     setTimeout(tick, 400);
     return;

@@ -21,7 +21,7 @@ from flask import Flask, abort, redirect, render_template, request, send_file, u
 from werkzeug.serving import make_server
 
 from laliga.backtest import walk_forward
-from laliga.config import ModelConfig, api_token
+from laliga.config import DEFAULT_SEASONS, ModelConfig, api_token
 from laliga.data.client import SportMonksError, open_client
 from laliga.data.fetch import fetch_historical, fetch_window
 from laliga.data.store import MatchStore
@@ -37,9 +37,11 @@ DEMO_FETCH_MESSAGE = (
 
 
 class Job:
-    def __init__(self, title: str) -> None:
+    def __init__(self, running_title: str, done_title: str, failed_title: str) -> None:
         self.id = uuid.uuid4().hex
-        self.title = title
+        self.running_title = running_title
+        self.done_title = done_title
+        self.failed_title = failed_title
         self.lines: list[str] = []
         self.done = False
         self.ok = False
@@ -62,9 +64,15 @@ class Job:
 
     def view(self) -> dict:
         with self._lock:
+            if not self.done:
+                title = self.running_title
+            elif self.ok:
+                title = self.done_title
+            else:
+                title = self.failed_title
             return {
                 "id": self.id,
-                "title": self.title,
+                "title": title,
                 "lines": list(self.lines),
                 "done": self.done,
                 "ok": self.ok,
@@ -110,6 +118,19 @@ def split_kickoff(value: str) -> tuple[str, str]:
     return stamp.strftime("%Y-%m-%d %H:%M"), singapore.strftime("%Y-%m-%d %H:%M")
 
 
+def format_when(value: str) -> str:
+    """Clock time in Asia/Singapore, with UTC, and no microseconds."""
+
+    text = (value or "").strip()
+    if not text:
+        return ""
+    try:
+        utc, singapore = split_kickoff(text)
+    except (TypeError, ValueError, OverflowError):
+        return text
+    return f"{singapore} 新加坡（{utc} UTC）"
+
+
 def _preload_demo(store: MatchStore) -> None:
     frame = store.load()
     if not frame.empty:
@@ -129,7 +150,7 @@ def _register(app: Flask) -> None:
 
     @app.context_processor
     def inject() -> dict:
-        return {"demo": demo(), "token_set": bool(api_token())}
+        return {"demo": demo(), "token_set": bool(api_token()), "default_seasons": DEFAULT_SEASONS}
 
     @app.get("/")
     def home():
@@ -139,11 +160,13 @@ def _register(app: Flask) -> None:
     def predictions():
         payload = _read_json(store().predictions_dir / "latest.json")
         items = []
+        created_label = ""
         if payload:
+            created_label = format_when(str(payload.get("created_at") or ""))
             for item in payload.get("items") or []:
                 utc, singapore = split_kickoff(item["starting_at"])
                 items.append({**item, "utc": utc, "singapore": singapore})
-        return render_template("predictions.html", payload=payload, items=items)
+        return render_template("predictions.html", payload=payload, items=items, created_label=created_label)
 
     @app.get("/fixtures/<int:fixture_id>")
     def fixture_detail(fixture_id: int):
@@ -201,7 +224,7 @@ def _register(app: Flask) -> None:
 
     @app.post("/actions/fetch")
     def start_fetch():
-        seasons = request.form.get("seasons", "6")
+        seasons = request.form.get("seasons", str(DEFAULT_SEASONS))
         refresh = request.form.get("refresh") == "1"
         try:
             count = int(seasons)
@@ -220,7 +243,7 @@ def _register(app: Flask) -> None:
             logging.getLogger("laliga.webapp").info("已写入 %s 场（完场 %s，未开赛 %s）。", len(frame), finished, scheduled)
             return "/data"
 
-        return _launch(app, "正在更新数据", work, "查看数据状态")
+        return _launch(app, "正在更新数据", work, "查看数据状态", done_title="数据更新完成", failed_title="数据更新失败")
 
     @app.post("/actions/train")
     def start_train():
@@ -231,11 +254,13 @@ def _register(app: Flask) -> None:
             model = fit_models(history, as_of, config)
             store().save_model_document(model.to_dict())
             logging.getLogger("laliga.webapp").info(
-                "训练完成，样本 %s 场，截止 %s。", model.ft.n_matches, model.ft.trained_through
+                "训练完成，样本 %s 场，截止 %s。",
+                model.ft.n_matches,
+                format_when(str(model.ft.trained_through)),
             )
             return "/data"
 
-        return _launch(app, "正在训练", work, "查看数据状态")
+        return _launch(app, "正在训练", work, "查看数据状态", done_title="训练完成", failed_title="训练失败")
 
     @app.post("/actions/backtest")
     def start_backtest():
@@ -253,7 +278,7 @@ def _register(app: Flask) -> None:
             logging.getLogger("laliga.webapp").info("回测完成，评测 %s 场。", report.model.n)
             return "/backtest"
 
-        return _launch(app, "正在回测", work, "查看回测")
+        return _launch(app, "正在回测", work, "查看回测", done_title="回测完成", failed_title="回测失败")
 
     @app.post("/actions/predict-next")
     def start_predict_next():
@@ -262,7 +287,7 @@ def _register(app: Flask) -> None:
             _write_predictions(store(), fixtures, "下一轮", note)
             return "/predictions"
 
-        return _launch(app, "正在预测下一轮", work, "查看预测")
+        return _launch(app, "正在预测下一轮", work, "查看预测", done_title="下一轮预测完成", failed_title="下一轮预测失败")
 
     @app.post("/actions/predict-range")
     def start_predict_range():
@@ -278,7 +303,7 @@ def _register(app: Flask) -> None:
             _write_predictions(store(), fixtures, f"{start.isoformat()} 至 {end.isoformat()}", "")
             return "/predictions"
 
-        return _launch(app, "正在按日期预测", work, "查看预测")
+        return _launch(app, "正在按日期预测", work, "查看预测", done_title="按日期预测完成", failed_title="按日期预测失败")
 
     @app.get("/jobs/<job_id>")
     def job_page(job_id: str):
@@ -295,13 +320,13 @@ def _register(app: Flask) -> None:
         return job.view()
 
 
-def _launch(app: Flask, title: str, work, result_label: str):
+def _launch(app: Flask, running_title: str, work, result_label: str, *, done_title: str, failed_title: str):
     lock: threading.Lock = app.extensions["job_lock"]
     with lock:
         running = next((job for job in app.extensions["jobs"].values() if not job.done), None)
         if running is not None:
             return redirect(url_for("job_page", job_id=running.id), code=303)
-        job = Job(title)
+        job = Job(running_title, done_title, failed_title)
         app.extensions["jobs"][job.id] = job
 
     def runner() -> None:
@@ -323,7 +348,7 @@ def _launch(app: Flask, title: str, work, result_label: str):
             logger.removeHandler(handler)
             logger.setLevel(previous)
 
-    job.add(title)
+    job.add(running_title)
     threading.Thread(target=runner, daemon=True).start()
     return redirect(url_for("job_page", job_id=job.id), code=303)
 

@@ -56,7 +56,10 @@ MAX_BETWEEN_DAYS = 100
 
 # xi = 0.0025 => half-life ln(2)/xi ≈ 277 days, so several seasons still contribute.
 DEFAULT_XI = 0.0025
-DEFAULT_SEASONS = 6
+# Many La Liga subscriptions, including the one used to verify this project,
+# only list seasons from 2024/2025 onward (three seasons). Asking for more
+# just keeps however many the league endpoint actually returns.
+DEFAULT_SEASONS = 3
 DEFAULT_MIN_TRAIN_MATCHES = 320
 DEFAULT_HT_GOAL_RATIO = 0.45
 

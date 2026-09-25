@@ -68,6 +68,7 @@ def test_empty_dashboard_every_control_and_external_link(tmp_path: Path, page: P
         expect(page.locator(".demo-banner")).to_have_count(0)
         expect(page.get_by_text("还没有本地比赛")).to_be_visible()
         expect(page.get_by_text("未设置 SPORTMONKS_API_TOKEN")).to_be_visible()
+        expect(page.locator("#fetch-form input[name=seasons]")).to_have_value("3")
         assert "北岸联" not in page.content()
         _assert_no_dead_links(page)
         stylesheet = page.request.get(app.base + "/static/app.css")
@@ -80,6 +81,7 @@ def test_empty_dashboard_every_control_and_external_link(tmp_path: Path, page: P
         _click_nav(page, "操作台")
 
         _submit(page, "更新数据")
+        expect(page.locator("#job-title")).to_have_text("数据更新失败")
         expect(page.locator("[role=alert]")).to_contain_text("SPORTMONKS_API_TOKEN")
         _click_nav(page, "操作台")
 
@@ -179,6 +181,7 @@ def test_mocked_sportmonks_pipeline(tmp_path: Path, page: Page, monkeypatch: pyt
         before = len(mock.hits)
         _submit(page, "更新数据")
         expect(page.locator("#log")).to_contain_text("将抓取")
+        expect(page.locator("#job-title")).to_have_text("数据更新完成")
         page.locator("#job-result").click()
         expect(page.get_by_role("heading", name="数据状态")).to_be_visible()
         expect(page.locator("main")).to_contain_text("9001")
@@ -222,6 +225,12 @@ def test_mocked_sportmonks_pipeline(tmp_path: Path, page: Page, monkeypatch: pyt
         page.locator("#job-result").click()
         expect(page.get_by_role("heading", name="预测结果")).to_be_visible()
         expect(page.locator(".demo-banner")).to_have_count(0)
+        generated = page.locator("main").inner_text()
+        assert "生成于" in generated
+        assert "+00:00" not in generated
+        clock = generated.split("生成于", 1)[1].split("。", 1)[0]
+        assert "新加坡（" in clock and " UTC）" in clock
+        assert "." not in clock
         row = page.locator("tbody tr").first
         utc = row.locator("td").nth(0).inner_text()
         singapore = row.locator("td").nth(1).inner_text()
@@ -275,6 +284,7 @@ def test_demo_mode_is_labelled_and_refuses_network(tmp_path: Path, page: Page, m
         _assert_demo_banner(page)
         expect(page.locator("body")).to_have_attribute("data-demo", "1")
         expect(page.get_by_text("本地比赛")).to_be_visible()
+        expect(page.locator("#fetch-form input[name=seasons]")).to_have_value("3")
 
         for name in NAV:
             _click_nav(page, name)
@@ -328,6 +338,21 @@ def test_demo_mode_is_labelled_and_refuses_network(tmp_path: Path, page: Page, m
         app.close()
 
 
+def test_finished_job_title_and_singapore_clock() -> None:
+    from laliga.webapp import Job, format_when
+
+    running = Job("正在更新数据", "数据更新完成", "数据更新失败")
+    assert running.view()["title"] == "正在更新数据"
+    running.finish(ok=True, result_url="/data", result_label="查看数据状态")
+    assert running.view()["title"] == "数据更新完成"
+    failed = Job("正在训练", "训练完成", "训练失败")
+    failed.finish(ok=False, error="没有完场")
+    assert failed.view()["title"] == "训练失败"
+
+    text = format_when("2026-09-25T18:31:51.349265+00:00")
+    assert text == "2026-09-26 02:31 新加坡（2026-09-25 18:31 UTC）"
+
+
 def _click_nav(page: Page, name: str) -> None:
     page.get_by_role("navigation", name="站内").get_by_role("link", name=name).click()
 
@@ -335,6 +360,8 @@ def _click_nav(page: Page, name: str) -> None:
 def _submit(page: Page, button: str, timeout: int = 60_000) -> None:
     page.get_by_role("button", name=button).click()
     page.locator("#job-result, [role=alert]").wait_for(timeout=timeout)
+    title = page.locator("#job-title").inner_text()
+    assert not title.startswith("正在"), title
 
 
 def _assert_no_dead_links(page: Page) -> None:

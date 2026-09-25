@@ -60,7 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     fetch = sub.add_parser("fetch", help="从 SportMonks 抓取西甲赛季并写入本地缓存")
     _add_data_dir(fetch)
-    fetch.add_argument("--seasons", type=int, default=DEFAULT_SEASONS, help="最近几个赛季，含当前赛季（默认 6）")
+    fetch.add_argument(
+        "--seasons",
+        type=int,
+        default=DEFAULT_SEASONS,
+        help=(
+            f"最近几个赛季，含当前赛季（默认 {DEFAULT_SEASONS}）。"
+            "接口列出的更少时，按实际数量抓取，不会因为数字更大而失败。"
+        ),
+    )
     fetch.add_argument("--refresh", action="store_true", help="忽略本地原始响应缓存，重新请求 API")
     fetch.add_argument("--replace", action="store_true", help="用本次抓取结果覆盖本地比赛表，而不是按 fixture_id 合并")
     fetch.set_defaults(func=cmd_fetch)

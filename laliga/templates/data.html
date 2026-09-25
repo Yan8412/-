@@ -63,7 +63,7 @@
   {% if not status.model %}
   <p class="empty">还没有训练好的模型。在操作台点击「训练模型」，或先预测一场比赛（预测时会按赛前数据拟合并保存）。</p>
   {% else %}
-  <p>上次训练截止 UTC {{ status.model.utc }}，新加坡 {{ status.model.singapore }}。样本 {{ status.model.n_matches }} 场。</p>
+  <p>上次训练截止 {{ status.model.singapore }} 新加坡（{{ status.model.utc }} UTC）。样本 {{ status.model.n_matches }} 场。</p>
   <p>主场优势 {{ '%.3f'|format(status.model.home_adv) }}，ρ {{ '%.3f'|format(status.model.rho) }}。半场来源：{{ "上半场单独拟合" if status.model.ht_source == "first_half" else "按全场比例缩放" }}。</p>
   {% endif %}
 </section>
