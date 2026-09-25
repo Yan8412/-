@@ -83,6 +83,47 @@ SPORTMONKS_API_TOKEN=你的token
 
 可选：`LALIGA_DATA_DIR` 或每个命令的 `--data-dir`，用来改数据目录（默认是当前目录下的 `data/`）。
 
+## 操作台
+
+在本机打开网页。进程只监听 `127.0.0.1`，不会对局域网开放：
+
+```bash
+python -m laliga web
+```
+
+浏览器访问 http://127.0.0.1:8765 。换端口用 `python -m laliga web --port 8766`。页面文字是简体中文。按钮调用的是上面同一套抓取、训练、回测和预测代码。
+
+| 按钮 | 作用 |
+| --- | --- |
+| 更新数据 | 向 SportMonks 拉取最近若干个赛季（默认 6），写入本地缓存 |
+| 训练模型 | 用本地全部完场比赛拟合，并保存模型 |
+| 运行回测 | 按日期走步，和历史频率基准比较。默认最少训练场次是 320；比赛不够时改小这个数字再运行 |
+| 预测下一轮 | 预测最近一轮未开赛比赛 |
+| 按日期预测 | 预测一段 UTC 日期内的未开赛比赛（含首尾两天） |
+
+点下去之后会进入任务页，日志会往下长。成功时出现「查看数据状态 / 查看回测 / 查看预测」。失败时红字写出原因，例如没设 `SPORTMONKS_API_TOKEN`、HTTP 401、订阅不含西甲（HTTP 403，免费计划不含联赛 564）、HTTP 429 限流。不会静默失败，也不会在失败时填上假比赛。
+
+四个站内页面：
+
+- **操作台**：上面这些按钮，以及当前缓存了多少场比赛
+- **预测结果**：开球时间同时给出 UTC 和新加坡时间（Asia/Singapore，UTC+8）、主客队、全场胜平负、半场胜平负、概率最高的三个比分。点球队名进入该场的完整比分概率表
+- **回测结果**：模型和历史频率基准的对数损失、Brier、命中率、前三比分命中率
+- **数据状态**：接口返回的赛季清单、本地比赛表里的赛季和场次、原始响应缓存文件数、上次训练时间
+
+预测和回测生成之后，页面上有 CSV / JSON 下载。文件还没生成时，直接打开下载地址会看到说明，而不是一份空表。
+
+没有 token、也没有本地缓存时，首页是空状态，并写明下一步要做什么。这里不会自动塞入示例比赛。
+
+示例模式默认关闭。只有加上 `--demo` 才会用合成赛程预填，而且每一页顶部都标明「合成示例数据，不是真实西甲」。这个模式拒绝去请求 SportMonks，避免把真实响应写进示例目录。
+
+```bash
+python -m laliga web --demo
+```
+
+操作台单次拟合最多 80 步。命令行 `train` 默认 150 步，样本很大时命令行可以多走一些迭代。
+
+页脚三个外链是核对过能打开的地址：[SportMonks 文档](https://docs.sportmonks.com/v3)、[比分字段说明](https://docs.sportmonks.com/v3/tutorials-and-guides/tutorials/includes/scores)、[项目仓库](https://github.com/Yan8412/-)。
+
 确认安装：
 
 ```bash
@@ -190,17 +231,26 @@ python -m laliga predict --from 2026-09-26 --to 2026-10-05 \
 pytest -q
 ```
 
-测试不访问 SportMonks。解析器用文档里的比分结构（含半场、90 分钟、加时里 `CURRENT` 与 `2ND_HALF` 的差别）；HTTP 客户端用假传输检查分页、429、限流和“缓存里不能出现 token”；模型用合成赛程做拟合、梯度核对、未来比赛不能泄漏进训练，以及走步回测对历史频率基准的比较。`demo` / `predict --next` 也在子进程里离线跑通。
+测试不访问真实的 SportMonks。解析器用文档里的比分结构（含半场、90 分钟、加时里 `CURRENT` 与 `2ND_HALF` 的差别）；HTTP 客户端用假传输检查分页、429、限流和“缓存里不能出现 token”；模型用合成赛程做拟合、梯度核对、未来比赛不能泄漏进训练，以及走步回测对历史频率基准的比较。`demo` / `predict --next` 也在子进程里离线跑通。
+
+操作台测试用 Playwright 打开真实页面，点每一个按钮，并跟着每一个站内链接和页脚外链走一遍。没有 token 时断言空状态和明确报错。带 token 的用例把 `SPORTMONKS_API_BASE` 指到本机的一个 HTTP 服务，响应外形与 SportMonks v3 相同（`data` / `pagination` / `rate_limit`，以及 401、403、429），真正的 `requests` 客户端会去请求它。日常使用不要设置 `SPORTMONKS_API_BASE`。首次跑这组测试需要：
+
+```bash
+python -m playwright install --with-deps chromium
+```
 
 ## 目录
 
 ```
-laliga/            命令行、SportMonks 客户端、Dixon–Coles 模型、回测
-tests/             离线测试
+laliga/            命令行、SportMonks 客户端、Dixon–Coles 模型、回测、操作台
+laliga/templates/  操作台页面
+laliga/static/     操作台样式
+tests/             离线测试，含操作台点击测试和 SportMonks 外形的本地 HTTP 模拟
 data/cache/        原始 API 响应（git 忽略）
 data/processed/    matches.csv、seasons.json
 data/models/       dixon_coles.json
-data/demo/         demo 的合成数据
+data/demo/         demo 命令的合成数据
+data/web-demo/     python -m laliga web --demo 的合成数据
 ```
 
 ## 本地第一次跑真实数据
@@ -215,6 +265,7 @@ python -m laliga fetch --seasons 6
 python -m laliga backtest --output data/predictions/backtest.json
 python -m laliga train
 python -m laliga predict --next
+python -m laliga web
 # 或者
 python -m laliga predict --from 2026-09-26 --to 2026-10-05 \
   --csv data/predictions/next.csv --json data/predictions/next.json

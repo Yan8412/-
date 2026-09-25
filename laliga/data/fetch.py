@@ -149,7 +149,8 @@ def _league_payload(client: SportMonksClient) -> dict[str, Any]:
     except SportMonksError as exc:
         if exc.status in (401, 403, 404) or "subscription" in str(exc).lower():
             raise SportMonksError(
-                "无法读取西甲联赛（ID 564）。免费计划不含 La Liga，请换用包含西甲的订阅，并检查 token。"
+                f"无法读取西甲联赛（ID 564）。{exc} "
+                "免费计划不含 La Liga，请换用包含西甲的订阅，并检查 token。"
             ) from exc
         raise
     data = body.get("data")

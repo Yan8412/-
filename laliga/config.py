@@ -94,3 +94,9 @@ def project_data_dir(explicit: str | Path | None = None) -> Path:
 def api_token() -> str | None:
     token = os.environ.get(TOKEN_ENV, "").strip()
     return token or None
+
+
+def api_base_url() -> str:
+    """Football API base. Override with SPORTMONKS_API_BASE only in tests."""
+
+    return os.environ.get("SPORTMONKS_API_BASE", API_BASE_URL).rstrip("/")

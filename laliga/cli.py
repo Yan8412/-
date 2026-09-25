@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 import pandas as pd
 
 from laliga.config import DEFAULT_MIN_TRAIN_MATCHES, DEFAULT_SEASONS, DEFAULT_XI, ModelConfig, api_token, project_data_dir
-from laliga.data.client import SportMonksClient, SportMonksError
+from laliga.data.client import SportMonksError, open_client
 from laliga.data.fetch import fetch_historical, fetch_window
 from laliga.data.parse import fixtures_to_frame
 from laliga.data.store import MatchStore
@@ -98,7 +98,34 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--max-iter", type=int, default=80)
     demo.add_argument("--xi", type=float, default=DEFAULT_XI)
     demo.set_defaults(func=cmd_demo)
+
+    web = sub.add_parser("web", help="在本机打开中文操作台")
+    _add_data_dir(web)
+    web.add_argument("--host", default="127.0.0.1", help="监听地址，默认只对本机开放")
+    web.add_argument("--port", type=int, default=8765)
+    web.add_argument(
+        "--demo",
+        action="store_true",
+        help="用合成示例数据预填界面，每页都会标明不是真实西甲。默认关闭。",
+    )
+    web.set_defaults(func=cmd_web)
     return parser
+
+
+def cmd_web(args: argparse.Namespace) -> int:
+    from laliga.webapp import serve
+
+    if args.demo and not args.data_dir:
+        root = project_data_dir() / "web-demo"
+    else:
+        root = project_data_dir(args.data_dir or None)
+    print(f"操作台：http://{args.host}:{args.port}")
+    if args.demo:
+        print("合成示例模式已打开。页面上的比赛不是真实西甲。关掉 --demo 后重启才会使用真实缓存。")
+    else:
+        print("未开启示例模式。没有 token 或本地缓存时，页面只显示空状态和错误，不会填入合成比赛。")
+    serve(root, host=args.host, port=args.port, demo=args.demo)
+    return 0
 
 
 def cmd_fetch(args: argparse.Namespace) -> int:
@@ -299,15 +326,11 @@ def _store(args: argparse.Namespace) -> MatchStore:
     return MatchStore(project_data_dir(getattr(args, "data_dir", "") or None))
 
 
-def _client(store: MatchStore, *, refresh: bool) -> SportMonksClient:
-    token = api_token()
-    if not token:
-        raise CliError(
-            "缺少环境变量 SPORTMONKS_API_TOKEN。复制 .env.example 为 .env 后填入 token。"
-            "免费计划不含西甲（联赛 ID 564）。",
-            exit_code=2,
-        )
-    return SportMonksClient(token, store.cache_dir, refresh=refresh)
+def _client(store: MatchStore, *, refresh: bool):
+    try:
+        return open_client(store.cache_dir, refresh=refresh)
+    except SportMonksError as exc:
+        raise CliError(str(exc), exit_code=2) from exc
 
 
 def _config(args: argparse.Namespace, min_train: int) -> ModelConfig:

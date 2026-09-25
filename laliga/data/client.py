@@ -36,6 +36,23 @@ Transport = Callable[[str, dict[str, str]], tuple[int, dict[str, str], Any]]
 Sleeper = Callable[[float], None]
 
 
+def open_client(cache_dir: Path, *, refresh: bool = False, min_interval: float | None = None) -> "SportMonksClient":
+    """Build a client from the environment. Raises SportMonksError if the token is missing."""
+
+    from laliga.config import API_BASE_URL, api_base_url, api_token
+
+    token = api_token()
+    if not token:
+        raise SportMonksError(
+            "缺少环境变量 SPORTMONKS_API_TOKEN。复制 .env.example 为 .env 后填入 token。"
+            "免费计划不含西甲（联赛 ID 564）。"
+        )
+    base = api_base_url()
+    if min_interval is None:
+        min_interval = 0.0 if base != API_BASE_URL else 0.25
+    return SportMonksClient(token, cache_dir, base_url=base, refresh=refresh, min_interval=min_interval)
+
+
 class SportMonksError(RuntimeError):
     def __init__(self, message: str, status: int | None = None):
         super().__init__(message)

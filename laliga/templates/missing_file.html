@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}还没有{{ label }}{% endblock %}
+{% block body %}
+<section class="panel">
+  <h2>还没有{{ label }}</h2>
+  <p class="empty">文件还没生成。请先在操作台完成对应的预测或回测，页面上出现下载链接后再保存。</p>
+  <p><a href="{{ url_for('home') }}">返回操作台</a></p>
+</section>
+{% endblock %}

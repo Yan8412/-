@@ -9,6 +9,7 @@ description = "La Liga match probabilities: full-time, half-time, and top scorel
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "flask==3.1.2",
     "numpy==2.2.6",
     "pandas==2.2.3",
     "python-dotenv==1.1.1",
@@ -17,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==8.4.2"]
+dev = ["pytest==8.4.2", "playwright==1.55.0"]
 
 [project.scripts]
 laliga = "laliga.cli:main"

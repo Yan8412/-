@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}{{ job.title }}{% endblock %}
+{% block body %}
+<section class="panel">
+  <h2>{{ job.title }}</h2>
+  <pre class="log" id="log">{{ job.lines | join('\n') }}</pre>
+  <div id="outcome">
+    {% if job.done and job.ok %}
+    <p><a id="job-result" href="{{ job.result_url }}">{{ job.result_label }}</a></p>
+    {% elif job.done %}
+    <p class="error" role="alert">{{ job.error }}</p>
+    {% else %}
+    <p class="muted" id="waiting">正在执行，页面会自动更新。</p>
+    {% endif %}
+  </div>
+</section>
+{% if not job.done %}
+<meta http-equiv="refresh" content="1">
+<script>
+const statusUrl = {{ url_for('job_status', job_id=job.id) | tojson }};
+async function tick() {
+  if (document.getElementById("job-result") || document.querySelector("[role=alert]")) return;
+  const response = await fetch(statusUrl);
+  if (!response.ok) return;
+  const job = await response.json();
+  document.getElementById("log").textContent = (job.lines || []).join("\n");
+  if (!job.done) {
+    setTimeout(tick, 400);
+    return;
+  }
+  const box = document.getElementById("outcome");
+  box.replaceChildren();
+  if (job.ok && job.result_url) {
+    const link = document.createElement("a");
+    link.id = "job-result";
+    link.href = job.result_url;
+    link.textContent = job.result_label;
+    const paragraph = document.createElement("p");
+    paragraph.appendChild(link);
+    box.appendChild(paragraph);
+  } else {
+    const error = document.createElement("p");
+    error.className = "error";
+    error.setAttribute("role", "alert");
+    error.textContent = job.error || "任务失败";
+    box.appendChild(error);
+  }
+}
+tick();
+</script>
+{% endif %}
+{% endblock %}
