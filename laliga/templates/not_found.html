@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}没有找到{% endblock %}
+{% block body %}
+<section class="panel">
+  <h2>没有找到</h2>
+  {% if fixture_id %}
+  <p class="empty">比赛 {{ fixture_id }} 不在本地比赛表里，也不在最近一次预测里。</p>
+  {% else %}
+  <p class="empty">这个地址没有对应的页面或任务。</p>
+  {% endif %}
+  <p><a href="{{ url_for('home') }}">返回操作台</a> · <a href="{{ url_for('predictions') }}">预测结果</a></p>
+</section>
+{% endblock %}

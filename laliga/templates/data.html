@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}数据状态{% endblock %}
+{% block body %}
+<section class="panel">
+  <h2>数据状态</h2>
+  <ul class="stats">
+    <li><strong>{{ status.matches }}</strong><span class="muted">本地比赛</span></li>
+    <li><strong>{{ status.finished }}</strong><span class="muted">完场</span></li>
+    <li><strong>{{ status.scheduled }}</strong><span class="muted">未开赛</span></li>
+    <li><strong>{{ status.cache_files }}</strong><span class="muted">原始响应缓存</span></li>
+  </ul>
+  {% if status.matches == 0 %}
+  <p class="empty">比赛表是空的。默认不会加载示例数据。请在操作台点击「更新数据」。</p>
+  {% endif %}
+</section>
+
+<section class="panel" style="margin-top: 14px">
+  <h2>SportMonks 赛季清单</h2>
+  {% if not status.seasons_api %}
+  <p class="empty">还没有通过「更新数据」写入赛季清单。只有接口成功返回后，这里才会出现联赛和赛季。</p>
+  {% else %}
+  <p>{{ status.league_name or "La Liga" }}</p>
+  <table>
+    <thead><tr><th>赛季</th><th>ID</th><th>开始</th><th>是否当前</th></tr></thead>
+    <tbody>
+      {% for season in status.seasons_api %}
+      <tr>
+        <td>{{ season.name }}</td>
+        <td>{{ season.id }}</td>
+        <td>{{ season.starting_at }}</td>
+        <td>{{ "是" if season.is_current else "否" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section class="panel" style="margin-top: 14px">
+  <h2>本地比赛表中的赛季</h2>
+  {% if not status.local_seasons %}
+  <p class="empty">本地比赛表里没有赛季。</p>
+  {% else %}
+  <table>
+    <thead><tr><th>赛季</th><th>ID</th><th>场次</th><th>完场</th><th>未开赛</th></tr></thead>
+    <tbody>
+      {% for season in status.local_seasons %}
+      <tr>
+        <td>{{ season.season_name }}</td>
+        <td>{{ season.season_id }}</td>
+        <td>{{ season.matches }}</td>
+        <td>{{ season.finished }}</td>
+        <td>{{ season.scheduled }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section class="panel" style="margin-top: 14px">
+  <h2>模型</h2>
+  {% if not status.model %}
+  <p class="empty">还没有训练好的模型。在操作台点击「训练模型」，或先预测一场比赛（预测时会按赛前数据拟合并保存）。</p>
+  {% else %}
+  <p>上次训练截止 {{ status.model.singapore }} 新加坡（{{ status.model.utc }} UTC）。样本 {{ status.model.n_matches }} 场。</p>
+  <p>主场优势 {{ '%.3f'|format(status.model.home_adv) }}，ρ {{ '%.3f'|format(status.model.rho) }}。半场来源：{{ "上半场单独拟合" if status.model.ht_source == "first_half" else "按全场比例缩放" }}。</p>
+  {% endif %}
+</section>
+{% endblock %}

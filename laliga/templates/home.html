@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}操作台{% endblock %}
+{% block body %}
+<section class="panel">
+  <h2>当前状态</h2>
+  {% if status.matches == 0 %}
+  <p class="empty">还没有本地比赛。这里不会填入示例赛程。请设置包含西甲（联赛 ID 564）的 SportMonks token，然后点「更新数据」。免费计划不含西甲。</p>
+  {% else %}
+  <ul class="stats">
+    <li><strong>{{ status.matches }}</strong><span class="muted">本地比赛</span></li>
+    <li><strong>{{ status.finished }}</strong><span class="muted">完场</span></li>
+    <li><strong>{{ status.scheduled }}</strong><span class="muted">未开赛</span></li>
+  </ul>
+  <p class="muted"><a href="{{ url_for('data_page') }}">查看赛季和模型详情</a></p>
+  {% endif %}
+  <p class="muted">操作台每次拟合最多 80 步。命令行 <code>train</code> 默认 150 步。</p>
+</section>
+
+<div class="cards" style="margin-top: 14px">
+  <section class="card">
+    <h2>更新数据</h2>
+    <p class="muted">从 SportMonks 拉取最近若干个西甲赛季，写入本地缓存。默认 {{ default_seasons }} 个：很多订阅从 2024/2025 起只有这三个赛季。接口列出更少时，按实际数量抓取。</p>
+    <form id="fetch-form" method="post" action="{{ url_for('start_fetch') }}">
+      <label>赛季数
+        <input name="seasons" type="number" min="1" max="20" value="{{ default_seasons }}" required>
+      </label>
+      <label class="check"><input type="checkbox" name="refresh" value="1"> 忽略缓存重新请求</label>
+      <button type="submit">更新数据</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>训练</h2>
+    <p class="muted">用本地全部完场比赛拟合，并保存模型。</p>
+    <form id="train-form" method="post" action="{{ url_for('start_train') }}">
+      <button type="submit">训练模型</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>回测</h2>
+    <p class="muted">按日期走步，只使用当天之前的完场比赛，并与历史频率比较。</p>
+    <form id="backtest-form" method="post" action="{{ url_for('start_backtest') }}">
+      <label>最少训练场次
+        <input name="min_train" type="number" min="4" value="{{ 18 if demo else 320 }}" required>
+      </label>
+      <button type="submit">运行回测</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>预测下一轮</h2>
+    <p class="muted">同一轮次里最早一场未开赛比赛所在的轮次。</p>
+    <form id="predict-next-form" method="post" action="{{ url_for('start_predict_next') }}">
+      <button type="submit">预测下一轮</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>按日期预测</h2>
+    <p class="muted">日期按 UTC 日历，含首尾两天。</p>
+    <form id="predict-range-form" method="post" action="{{ url_for('start_predict_range') }}">
+      <label>开始 <input name="start" type="date" required></label>
+      <label>结束 <input name="end" type="date" required></label>
+      <button type="submit">按日期预测</button>
+    </form>
+  </section>
+</div>
+{% endblock %}

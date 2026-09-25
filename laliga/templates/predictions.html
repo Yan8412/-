@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}预测结果{% endblock %}
+{% block body %}
+<section class="panel">
+  <h2>预测结果</h2>
+  {% if not items %}
+  <p class="empty">还没有预测。回到操作台，在本地已有未开赛比赛后点击「预测下一轮」或「按日期预测」。没有缓存时这里保持空白，不会显示示例比赛。</p>
+  {% else %}
+  <p class="muted">{{ payload.label }}。生成于 {{ created_label }}。{% if payload.note %}{{ payload.note }}{% endif %}</p>
+  <p>
+    <a href="{{ url_for('download_predictions_csv') }}">下载预测 CSV</a>
+    ·
+    <a href="{{ url_for('download_predictions_json') }}">下载预测 JSON</a>
+  </p>
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>开球 UTC</th>
+          <th>开球 新加坡</th>
+          <th>主队</th>
+          <th>客队</th>
+          <th>全场胜</th>
+          <th>全场平</th>
+          <th>全场负</th>
+          <th>半场胜</th>
+          <th>半场平</th>
+          <th>半场负</th>
+          <th>比分 1</th>
+          <th>比分 2</th>
+          <th>比分 3</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in items %}
+        <tr>
+          <td>{{ item.utc }}</td>
+          <td>{{ item.singapore }}</td>
+          <td><a href="{{ url_for('fixture_detail', fixture_id=item.fixture_id) }}">{{ item.home_team }}</a></td>
+          <td><a href="{{ url_for('fixture_detail', fixture_id=item.fixture_id) }}">{{ item.away_team }}</a></td>
+          <td>{{ '%.1f'|format(item.ft.home * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.ft.draw * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.ft.away * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.ht.home * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.ht.draw * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.ht.away * 100) }}%</td>
+          {% for score in item.top_scores %}
+          <td>{{ score.home_goals }}-{{ score.away_goals }} {{ '%.1f'|format(score.probability * 100) }}%</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}
