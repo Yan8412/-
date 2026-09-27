@@ -12,6 +12,7 @@ from pathlib import Path
 from ashare.broker.base import AccountSnapshot, Broker, OrderAck, OrderRequest
 from ashare.config import Settings
 from ashare.market import SymbolSeries
+from ashare.filters import bar_halted
 from ashare.rules.costs import buy_cash_out, sell_cash_in
 from ashare.rules.execution import evaluate_buy, evaluate_sell
 from ashare.rules.lots import suggest_shares
@@ -168,7 +169,7 @@ class PaperBroker(Broker):
                 continue
             series = series_by_code.get(order.code)
             index = None if series is None else series.date_index.get(day)
-            if series is None or index is None or series.volume[index] <= 0:
+            if series is None or index is None or bar_halted(series, index):
                 notes.append(f"{order.code} 停牌或无K线，委托继续等待")
                 continue
             decision = evaluate_buy(
@@ -250,7 +251,7 @@ class PaperBroker(Broker):
             days_held = pos.sessions_held + 1
             series = series_by_code.get(pos.code)
             index = None if series is None else series.date_index.get(day)
-            if series is None or index is None or series.volume[index] <= 0:
+            if series is None or index is None or bar_halted(series, index):
                 kept.append(pos)
                 if phase == "late":
                     notes.append(f"{pos.code} 停牌，卖出顺延")

@@ -19,7 +19,7 @@ def rejection_reason(series: SymbolSeries, index: int, settings: Settings) -> st
         return "历史K线不足"
     if (not series.left_censored) and index < settings.min_listed_bars:
         return "次新股"
-    if series.volume[index] <= 0 or series.amount[index] <= 0:
+    if bar_halted(series, index):
         return "停牌"
     price = float(series.close[index])
     if price < settings.price_min or price > settings.price_max:
@@ -51,6 +51,8 @@ def eligible_mask(series: SymbolSeries, settings: Settings) -> np.ndarray:
     if not series.left_censored:
         ok &= index >= settings.min_listed_bars
     ok &= (series.volume > 0) & (series.amount > 0)
+    if series.halted is not None and len(series.halted) == n:
+        ok &= ~np.asarray(series.halted, dtype=bool)
     ok &= (series.close >= settings.price_min) & (series.close <= settings.price_max)
     ok &= series.amount >= settings.min_amount
     if settings.min_swing_20d > 0 and len(series.swing20) == n:
@@ -77,6 +79,14 @@ def _cents(values: np.ndarray) -> np.ndarray:
     """Half-up cents for a price array. Matches ``to_cents`` on normal quotes."""
     scaled = np.asarray(values, dtype=np.float64) * 100.0
     return np.floor(scaled + 0.5 + 1e-8).astype(np.int64)
+
+
+def bar_halted(series: SymbolSeries, index: int) -> bool:
+    """No trade when the bar is empty or Baostock marks the session suspended."""
+    if series.volume[index] <= 0 or series.amount[index] <= 0:
+        return True
+    halted = series.halted
+    return halted is not None and index < len(halted) and bool(halted[index])
 
 
 def _st_on_day(series: SymbolSeries, index: int) -> bool:

@@ -120,6 +120,11 @@ def page_shortlist() -> None:
         "收盘价",
         "得分",
         "模型分数",
+        "首封时间",
+        "炸板次数",
+        "回封",
+        "竞价价",
+        "竞价量",
     ]
     columns = [name for name in preferred if name in frame.columns]
     show = frame[columns].copy()
@@ -205,6 +210,34 @@ def _market_banner() -> None:
         extra.append("排序模型未训练，候选按规则分")
     if extra:
         st.caption(" · ".join(extra))
+    _pool_banner()
+
+
+def _pool_banner() -> None:
+    snapshot = load_json_object(REPORT_DIR / "pool_latest.json")
+    if not snapshot:
+        return
+    source = {"ths": "同花顺", "akshare": "东财", "none": "无数据"}.get(snapshot.get("source") or "", snapshot.get("source") or "")
+    broken = snapshot.get("broken_rate")
+    broken_text = "—" if broken is None else f"{float(broken) * 100:.1f}%"
+    st.caption(
+        f"涨停池 {snapshot.get('date', '')}（{source}）："
+        f"涨停 {int(snapshot.get('limit_up_count') or 0)}，"
+        f"炸板率 {broken_text}，"
+        f"最高连板 {int(snapshot.get('max_streak') or 0)}，"
+        f"跌停 {int(snapshot.get('limit_down_count') or 0)}"
+    )
+    examples = snapshot.get("examples") or []
+    if examples:
+        bits = []
+        for row in examples:
+            seal = row.get("seal_time") or ""
+            reason = row.get("reason") or ""
+            extra = " ".join(part for part in (seal, reason) if part)
+            bits.append(f"{row.get('code', '')} {row.get('name', '')}" + (f"（{extra}）" if extra else ""))
+        st.caption("封板时间 / 原因：" + "；".join(bits))
+    if snapshot.get("warning"):
+        st.caption(snapshot["warning"])
 
 
 def _regime_section() -> None:

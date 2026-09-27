@@ -19,6 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+market = ["pyarrow>=15", "eltdx>=3.2", "akshare>=1.16"]
 
 [project.scripts]
 ashare = "ashare.cli:main"

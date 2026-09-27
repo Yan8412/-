@@ -55,7 +55,10 @@ def run_regime_research(
 ) -> Path:
     """Train on pre-holdout trades, then backtest each arm once."""
     symbols, notes, chosen, stats = load_universe(settings, today, cache_dir)
-    flagged = attach_inferred_st(symbols)
+    attach_inferred_st(symbols)
+    flagged = sum(
+        1 for series in symbols if series.st_flags is not None and bool(series.st_flags.any())
+    )
     panel = build_market_panel(symbols, settings)
     calendar = panel.calendar
     strategies = core_strategies()
@@ -151,6 +154,7 @@ def run_regime_research(
         notes = list(notes)
         notes.extend(coverage_notes(chosen, stats, full_start, full_end, len(symbols)))
     payload["notes"] = _notes(notes, flagged, train_rows, used_fallback, params, frozen is not None, settings)
+    payload["previous_oos"] = _previous_oos(report_dir / "regime_ml_latest.json")
     report_dir.mkdir(parents=True, exist_ok=True)
     json_path = report_dir / "regime_ml_latest.json"
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -362,7 +366,7 @@ def _notes(
     settings: Settings,
 ) -> list[str]:
     lines = [
-        "比较的是同一套默认参数下的首板次日承接和均线回踩，不是五策略走步。三组实验都使用了按 5% 封板推断的 ST 标记，因此差额来自行情过滤和模型排序。",
+        "比较的是同一套默认参数下的首板次日承接和均线回踩，不是五策略走步。差额来自行情过滤和模型排序，以及这次改用 Baostock 逐日 isST 之后股票池的变化。",
         (
             f"行情过滤（写死，未按样本外调整）：至少 {settings.regime_min_names} 只股票有 MA20，"
             f"其中收盘在 MA20 之上的比例 ≥ {settings.regime_breadth_min:.0%}，"
@@ -374,7 +378,7 @@ def _notes(
         f"样本外模型的训练样本是 {train_rows} 笔在 2025-04-25 之前已经平仓的交易。样本外区间没有再训练。"
         if model_ready
         else "样本外之前的完整交易不够 200 笔，没有训练模型，模型排序这一组不会开仓。",
-        f"按 5% 涨跌停封板推断、至少有一天像 ST 的股票有 {flagged} 只。这不是交易所的 ST 名单。当前名称里带 ST 的股票仍然整段排除。创业板、科创板和北交所没有 5% 档，不打这个标记。",
+        f"逐日 ST 使用 Baostock isST。至少有一天标记为 ST 的股票有 {flagged} 只。没有逐日文件的股票不按当前名称整段排除，也不再用 5% 封板去猜。主板 ST 当日涨跌停按 5%，创业板、科创板、北交所维持 20% 或 30%。",
         "样本外账户从区间前一个交易日的收盘开始，本金仍按 2 万元计，这样区间第一天的开盘可以成交。总收益的分母是 2 万元，不是区间第一天的权益。",
         "t 统计量是已平仓交易盈亏的均值除以标准误（样本标准差，分母 n-1）。它描述这一段历史里这些交易的离散程度，不是未来还会重复的证明。",
     ]
@@ -447,10 +451,71 @@ def _markdown(payload: dict) -> str:
         lines.append("| --- | ---: |")
         for item in payload["importances"]:
             lines.append(f"| {item['feature']} | {item['importance']:.4f} |")
+    previous = payload.get("previous_oos") or []
+    if previous:
+        lines.extend(["", "## 和上一轮样本外对比", ""])
+        lines.append("上一轮用当前名称整段排除 ST，并用 5% 封板近似其余日期。这一轮用 Baostock 逐日 isST 和 tradestatus。")
+        lines.append("")
+        lines.append("| 方案 | 上一轮收益 | 这一轮收益 | 上一轮回撤 | 这一轮回撤 | 上一轮笔数 | 这一轮笔数 | 上一轮胜率 | 这一轮胜率 | 上一轮 t | 这一轮 t |")
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+        current = {row["label"]: row for row in payload["comparison"] if row["window"] == "oos"}
+        for item in payload["per_strategy"]:
+            current[item["strategy"] + " + 行情过滤"] = item["regime_oos"]
+        for row in previous:
+            label = row.get("label") or ""
+            now = current.get(label)
+            if now is None:
+                continue
+            lines.append(
+                "| {label} | {br} | {ar} | {bd} | {ad} | {bt} | {at} | {bw} | {aw} | {bs} | {as_} |".format(
+                    label=label,
+                    br=_pct(row["total_return"]),
+                    ar=_pct(now["total_return"]),
+                    bd=_pct(row["max_drawdown"]),
+                    ad=_pct(now["max_drawdown"]),
+                    bt=row["trade_count"],
+                    at=now["trade_count"],
+                    bw=_pct(row["win_rate"]),
+                    aw=_pct(now["win_rate"]),
+                    bs=f"{float(row.get('tstat') or 0):.2f}",
+                    as_=f"{float(now.get('tstat') or 0):.2f}",
+                )
+            )
     lines.extend(["", "## 数据与规则", ""])
     lines.extend(f"- {note}" for note in payload.get("notes") or [])
     lines.append("")
     return "\n".join(lines)
+
+
+def _previous_oos(path: Path) -> list[dict]:
+    """Out-of-sample rows from the report this run is about to replace."""
+    if not path.exists():
+        return []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, dict) or payload.get("previous_oos"):
+        return []
+    rows: list[dict] = []
+    for row in payload.get("comparison") or []:
+        if row.get("window") != "oos":
+            continue
+        rows.append(_oos_view(row.get("label") or "", row))
+    for item in payload.get("per_strategy") or []:
+        rows.append(_oos_view(f"{item.get('strategy', '')} + 行情过滤", item.get("regime_oos") or {}))
+    return [row for row in rows if row.get("trade_count") is not None]
+
+
+def _oos_view(label: str, row: dict) -> dict:
+    return {
+        "label": label,
+        "total_return": row.get("total_return"),
+        "max_drawdown": row.get("max_drawdown"),
+        "trade_count": row.get("trade_count"),
+        "win_rate": row.get("win_rate"),
+        "tstat": row.get("tstat"),
+    }
 
 
 def _pct(value: float) -> str:

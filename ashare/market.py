@@ -53,6 +53,7 @@ class SymbolSeries:
     ipo_date: date | None = None
     out_date: date | None = None
     st_flags: np.ndarray | None = None
+    halted: np.ndarray | None = None
     date_index: dict[date, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

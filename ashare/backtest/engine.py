@@ -12,7 +12,7 @@ from decimal import Decimal
 import numpy as np
 
 from ashare.config import Settings
-from ashare.filters import eligible_mask, rejection_reason
+from ashare.filters import bar_halted, eligible_mask, rejection_reason
 from ashare.market import SymbolSeries, master_calendar
 from ashare.rules.costs import buy_cash_out, sell_cash_in
 from ashare.rules.execution import evaluate_buy, evaluate_sell
@@ -217,7 +217,7 @@ def _sell_phase(
             continue
         series = by_code[pos.code]
         index = series.date_index.get(day)
-        if index is None or series.volume[index] <= 0:
+        if index is None or bar_halted(series, index):
             if phase == "late":
                 _bump(rejects, "停牌顺延")
             kept.append(pos)
@@ -286,7 +286,7 @@ def _buy_phase(
         if series is None:
             continue
         index = series.date_index.get(day)
-        if index is None or series.volume[index] <= 0:
+        if index is None or bar_halted(series, index):
             _bump(rejects, "停牌无法买入")
             continue
         decision = evaluate_buy(

@@ -21,10 +21,10 @@ from ashare.broker.paper import PaperBroker
 from ashare.config import Settings
 from ashare.data.cache import load_bars
 from ashare.data.sources import MarketData
+from ashare.data.st_history import apply_trading_status, load_status, sync_st_history
 from ashare.data.universe import coverage_notes, load_catalog, select_for_download
 from ashare.market import SymbolSeries, build_symbol, mark_listing_censorship, master_calendar
 from ashare.ranker import load_ranker, score_candidate
-from ashare.rules.limits import is_risk_name
 from ashare.sentiment import MarketPanel, attach_inferred_st, build_market_panel, market_day_payload
 from ashare.report import (
     render_backtest_report,
@@ -59,8 +59,9 @@ def _load_liquid_sample(settings: Settings, today: date, cache_dir: Path) -> tup
     notes.append(
         "主行情源为腾讯日线（不复权，含除权信息）；单只失败时改用新浪日线。"
         "2026-09-27 探测东财 push2his 得到空响应，本次运行没有访问东财。"
-        "通达信公开行情端口按 2026-09 的公开记录已不可用，未接入。"
+        "日线不走通达信。可选的 eltdx 只在收盘更新里补当天涨停附近的分时。"
     )
+    sync_st_history(cache_dir, [code for code, _name in candidates], today)
     for code, name in candidates:
         if len(symbols) >= settings.universe_size:
             break
@@ -70,6 +71,7 @@ def _load_liquid_sample(settings: Settings, today: date, cache_dir: Path) -> tup
             notes.append(f"{code} {name} 日线失败，已跳过：{exc}")
             continue
         series = build_symbol(code, name, bars)
+        apply_trading_status(series, load_status(cache_dir, code) or {})
         if len(series.dates) < settings.min_history_bars + 5:
             notes.append(f"{code} {name} 可用K线不足，已跳过")
             continue
@@ -94,9 +96,17 @@ def _load_full_market(
         today,
         workers=4,
     )
+    codes = [item.code for item in chosen]
+    st_summary = sync_st_history(cache_dir, codes, today)
+    notes.append(
+        "逐日 ST 与停牌来自 Baostock 的 isST、tradestatus，按当天判断，不用今天的名称。"
+        f"这次缓存已是最新 {st_summary['fresh']} 只，更新 {st_summary['updated']} 只，失败 {st_summary['failed']} 只。"
+        "没有逐日记录的股票不按当前名称整段排除。主板 ST 当日涨跌停按 5%，创业板和科创板仍是 20%，北交所仍是 30%。"
+    )
     symbols: list[SymbolSeries] = []
     too_short = 0
-    st_skipped = 0
+    st_missing = 0
+    st_names = 0
     for item in chosen:
         failure = errors.get(item.code)
         if failure:
@@ -108,23 +118,29 @@ def _load_full_market(
             continue
         item.bars = len(bars)
         item.last_bar = bars[-1].date.isoformat()
-        if is_risk_name(item.name):
-            st_skipped += 1
-            del bars
-            continue
         if len(bars) < settings.min_history_bars + 5:
             too_short += 1
             del bars
             continue
         series = build_symbol(item.code, item.name, bars)
         del bars
+        status = load_status(cache_dir, item.code)
+        if status is None:
+            st_missing += 1
+            apply_trading_status(series, {})
+        else:
+            apply_trading_status(series, status)
+            if series.st_flags is not None and bool(series.st_flags.any()):
+                st_names += 1
         series.ipo_date = item.ipo()
         series.out_date = item.out()
         symbols.append(series)
         if len(symbols) % 500 == 0:
             logger.info("已整理 %s 只日线", len(symbols))
     stats["too_short"] = too_short
-    stats["st_skipped"] = st_skipped
+    stats["st_skipped"] = 0
+    stats["st_missing"] = st_missing
+    stats["st_names"] = st_names
     mark_listing_censorship(symbols)
     if not symbols:
         raise RuntimeError("没有下载到任何可用日线，无法生成推荐或回测。")
@@ -207,7 +223,10 @@ def run_daily(
     attach_inferred_st(symbols)
     panel = build_market_panel(symbols, settings)
     day = latest_common_day(symbols)
-    return publish_daily(symbols, panel, settings, day, report_dir, paper_path, notes)
+    _fetch_optional_intraday(cache_dir, symbols, day)
+    path = publish_daily(symbols, panel, settings, day, report_dir, paper_path, notes, cache_dir)
+    _snapshot_optional_pools(cache_dir, report_dir, day, settings)
+    return path
 
 
 def publish_daily(
@@ -218,6 +237,7 @@ def publish_daily(
     report_dir: Path,
     paper_path: Path | None,
     notes: list[str],
+    cache_dir: Path | None = None,
 ) -> Path:
     """Write the shortlist for one close. Paper orders are skipped when the regime is off."""
     strategies = strategies_from_ids(settings.strategies)
@@ -225,6 +245,10 @@ def publish_daily(
     pool = max(settings.ml_pool, settings.top_n) if settings.use_ranker else settings.top_n
     rows = build_recommendations(symbols, settings, day, strategies, cap=pool)
     rows = _rank_rows(rows, symbols, panel, model, settings)
+    if cache_dir is not None:
+        from ashare.data.intraday import annotate_rows, load_intraday
+
+        annotate_rows(rows, load_intraday(cache_dir, day))
     info = panel.days.get(day)
     risk_on = bool(info.risk_on) if info is not None else False
     preface = _daily_preface(settings, day, info, model, risk_on, notes, strategies)
@@ -445,6 +469,24 @@ def run_research(
     return path
 
 
+def _fetch_optional_intraday(cache_dir: Path, symbols: list[SymbolSeries], day: date) -> None:
+    try:
+        from ashare.data.intraday import fetch_intraday
+
+        fetch_intraday(cache_dir, symbols, day)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("分时封板特征跳过：%s", exc)
+
+
+def _snapshot_optional_pools(cache_dir: Path, report_dir: Path, day: date, settings: Settings) -> None:
+    try:
+        from ashare.data.limit_pool import snapshot_limit_pools
+
+        snapshot_limit_pools(cache_dir, report_dir, day, settings)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("涨停池快照跳过：%s", exc)
+
+
 def _baseline_lines(report_dir: Path) -> list[str]:
     path = report_dir / "baseline_50_sample.md"
     if not path.exists():
@@ -466,7 +508,9 @@ def settle_paper(settings: Settings, cache_dir: Path, paper_path: Path, today: d
     for code in sorted(codes):
         name = next((item["name"] for item in snapshot.positions + snapshot.pending if item["code"] == code), code)
         bars = source.get_bars(code, settings.history_bars, today)
-        series_by_code[code] = build_symbol(code, name, bars)
+        series = build_symbol(code, name, bars)
+        apply_trading_status(series, load_status(cache_dir, code) or {})
+        series_by_code[code] = series
     pending_dates = [date.fromisoformat(item["signal_date"]) for item in snapshot.pending]
     position_dates = [date.fromisoformat(item["buy_date"]) for item in snapshot.positions]
     origin_dates = pending_dates + position_dates

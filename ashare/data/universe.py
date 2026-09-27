@@ -168,16 +168,15 @@ def coverage_notes(
         f"Baostock 标记已退市 {stats.get('delisted', 0)} 只。",
         f"退市早于回看起点（约 {LOOKBACK_DAYS} 个自然日）而未下载的有 {stats.get('delisted_before_lookback', 0)} 只。",
         f"实际发起日线下载 {stats.get('download', 0)} 只，进入回测 {loaded} 只。"
-        f"K线短于策略所需而跳过 {stats.get('too_short', 0)} 只。"
-        f"当前风险名称整段跳过 {stats.get('st_skipped', 0)} 只。板块：{board_text or '无'}。",
+        f"K线短于策略所需而跳过 {stats.get('too_short', 0)} 只。板块：{board_text or '无'}。",
         f"样本 {start.isoformat()} 至 {end.isoformat()} 内需要覆盖的退市股票 {len(in_window)} 只："
         f"日线覆盖到样本起点之后的 {len(with_bars)} 只，"
         f"有日线但最后一根早于样本起点的 {len(ended_early)} 只，"
         f"免费日线没有返回的 {len(missing)} 只。",
-        f"当前名称含 ST、*ST 或退市字样的有 {stats.get('current_st', 0)} 只。"
-        "腾讯和新浪日线没有逐日 ST 字段。Baostock 有逐日 isST，但单只查询实测约 0.8 秒，"
-        "全市场大约要一小时，这次没有拉取。因此这些股票按当前名称整段排除；"
-        "已经摘帽、样本期内曾经 ST 的日期没有被去掉。这不是逐日 ST 过滤。",
+        f"当前名称含 ST、*ST 或退市字样的有 {stats.get('current_st', 0)} 只，不再按这个名称整段剔除。"
+        f"Baostock 逐日 isST 至少命中一天的有 {stats.get('st_names', 0)} 只，"
+        f"没有逐日文件的有 {stats.get('st_missing', 0)} 只。"
+        "停牌日用 tradestatus=0，当天不能买卖。主板 ST 当天的涨跌停是 5%。",
         "停牌日在腾讯日线里通常直接缺 bar，回测按当天没有行情处理，不使用未来的复牌价。",
         "次新用上市日期（Baostock 有的话）或首根 K 线晚于样本起点来判断，默认上市不满 120 根日线不买。"
         "成交额下限和价格带按信号当日的成交额和收盘价判断。",

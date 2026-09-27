@@ -1,4 +1,4 @@
-"""Price-limit bands by board. ST names are excluded upstream, not re-priced here."""
+"""Price-limit bands by board. Main-board ST days use 5% when the caller says so."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from ashare.rules.money import CENT, D, money, to_cents
 MAIN_LIMIT = Decimal("0.10")
 GROWTH_LIMIT = Decimal("0.20")
 BEIJING_LIMIT = Decimal("0.30")
+ST_MAIN_LIMIT = Decimal("0.05")
 
 
 def normalize_code(code: str) -> str:
@@ -51,9 +52,16 @@ def board_limit_ratio(code: str) -> Decimal:
     return MAIN_LIMIT
 
 
-def limit_prices(preclose: object, code: str) -> tuple[Decimal, Decimal]:
-    """Exchange limit-up and limit-down prices, rounded half-up to 0.01."""
+def limit_prices(preclose: object, code: str, st: bool = False) -> tuple[Decimal, Decimal]:
+    """Exchange limit-up and limit-down prices, rounded half-up to 0.01.
+
+    ``st`` narrows a main-board name to 5% on that date. ChiNext, STAR, and
+    Beijing keep 20% or 30% — that is the width those boards use, including
+    on risk-warning days in the current rule set.
+    """
     ratio = board_limit_ratio(code)
+    if st and ratio == MAIN_LIMIT:
+        ratio = ST_MAIN_LIMIT
     base = D(preclose)
     up = (base * (Decimal("1") + ratio)).quantize(CENT, rounding=ROUND_HALF_UP)
     down = (base * (Decimal("1") - ratio)).quantize(CENT, rounding=ROUND_HALF_UP)

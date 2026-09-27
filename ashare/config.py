@@ -61,6 +61,9 @@ class Settings:
         default_factory=lambda: ["first_board_follow", "ma_pullback"]
     )
     use_ranker: bool = False
+    # Environment variable that holds the Tonghuashun Financial-API key.
+    # The value itself is never stored in this file.
+    ths_api_key_env: str = "THS_API_KEY"
 
     def slot_budget(self, equity: float, cash: float) -> float:
         """Cash allocated to one new position, capped by the account rules."""

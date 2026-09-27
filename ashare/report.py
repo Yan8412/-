@@ -225,6 +225,11 @@ def write_recommendations_csv(path: Path, rows: list[dict]) -> None:
         "预估金额",
         "信号日",
         "收盘价",
+        "首封时间",
+        "炸板次数",
+        "回封",
+        "竞价价",
+        "竞价量",
     ]
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -247,5 +252,10 @@ def write_recommendations_csv(path: Path, rows: list[dict]) -> None:
                     "预估金额": f"{row['budget']:.2f}",
                     "信号日": row["signal_date"],
                     "收盘价": f"{row['close']:.2f}",
+                    "首封时间": row.get("first_seal") or "",
+                    "炸板次数": row.get("broken_seals") if row.get("broken_seals") is not None else "",
+                    "回封": row.get("resealed") or "",
+                    "竞价价": row.get("auction_price") if row.get("auction_price") is not None else "",
+                    "竞价量": row.get("auction_volume") if row.get("auction_volume") is not None else "",
                 }
             )

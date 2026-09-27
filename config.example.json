@@ -21,5 +21,6 @@
   "regime_min_names": 200,
   "ml_pool": 80,
   "strategies": ["first_board_follow", "ma_pullback"],
-  "use_ranker": false
+  "use_ranker": false,
+  "ths_api_key_env": "THS_API_KEY"
 }
