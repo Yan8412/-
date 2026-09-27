@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 
@@ -95,12 +96,21 @@ def run_backtest(
     *,
     label: str | None = None,
     param_schedule: dict[str, list[tuple[date, date, dict]]] | None = None,
+    entry_allowed: dict[date, bool] | None = None,
+    rescore: Callable[[PendingBuy], float | None] | None = None,
+    pool_size: int | None = None,
+    prepared_book: dict[date, list[PendingBuy]] | None = None,
 ) -> BacktestResult:
     """Simulate one account.
 
     ``param_schedule`` maps a strategy id to inclusive ``(test_start, test_end, params)``
     windows. On dates outside every window the strategy does not open new trades.
     Training selection must pass windows that were chosen without the test prices.
+
+    ``entry_allowed`` blocks new entries on sessions mapped to false. Open positions
+    still exit. ``rescore`` replaces the rule score and keeps the top ``top_n``;
+    ``pool_size`` is how many rule-ranked names are offered to that rescore.
+    ``prepared_book`` skips rebuilding the rule book when the caller already has it.
     """
     calendar = [day for day in master_calendar(symbols) if start <= day <= end]
     by_code = {item.code: item for item in symbols}
@@ -117,11 +127,13 @@ def run_backtest(
     positions: list[Position] = []
     pending: list[PendingBuy] = []
     fast = all(getattr(strategy, "vectorized", False) for strategy, _params in strategies)
-    book = (
-        _signal_book(list(by_code.values()), strategies, settings, param_schedule)
-        if fast
-        else None
-    )
+    cap = settings.top_n if pool_size is None else pool_size
+    if prepared_book is not None:
+        book = prepared_book
+    elif fast:
+        book = _signal_book(list(by_code.values()), strategies, settings, param_schedule, cap=cap)
+    else:
+        book = None
     trades: list[ClosedTrade] = []
     rejects: dict[str, int] = {}
     equity_dates: list[date] = []
@@ -148,9 +160,22 @@ def run_backtest(
         if next_day is None:
             continue
         if book is None:
-            pending = _collect_signals(by_code, day, strategies, settings, param_schedule)
+            pending = _collect_signals(by_code, day, strategies, settings, param_schedule, cap=cap)
         else:
-            pending = book.get(day, [])
+            pending = list(book.get(day, []))
+        if entry_allowed is not None and not entry_allowed.get(day, True):
+            for _order in pending:
+                _bump(rejects, "行情过滤不开新仓")
+            pending = []
+        elif rescore is not None:
+            scored: list[PendingBuy] = []
+            for order in pending:
+                value = rescore(order)
+                if value is None:
+                    continue
+                scored.append(replace(order, score=float(value)))
+            scored.sort(key=lambda item: item.score, reverse=True)
+            pending = scored[: settings.top_n]
 
     return BacktestResult(
         strategy_id=strategy_id,
@@ -330,6 +355,7 @@ def _signal_book(
     strategies: list[tuple[Strategy, dict]],
     settings: Settings,
     param_schedule: dict[str, list[tuple[date, date, dict]]] | None,
+    cap: int | None = None,
 ) -> dict[date, list[PendingBuy]]:
     """Precompute the same top-N orders ``_collect_signals`` would emit.
 
@@ -398,7 +424,8 @@ def _signal_book(
                 )
             )
         orders.sort(key=lambda item: item.score, reverse=True)
-        book[day] = orders[: settings.top_n]
+        limit = settings.top_n if cap is None else cap
+        book[day] = orders[:limit]
     return book
 
 
@@ -430,6 +457,7 @@ def _collect_signals(
     strategies: list[tuple[Strategy, dict]],
     settings: Settings,
     param_schedule: dict[str, list[tuple[date, date, dict]]] | None,
+    cap: int | None = None,
 ) -> list[PendingBuy]:
     orders: list[PendingBuy] = []
     for series in by_code.values():
@@ -468,7 +496,8 @@ def _collect_signals(
         if best is not None:
             orders.append(best)
     orders.sort(key=lambda item: item.score, reverse=True)
-    return orders[: settings.top_n]
+    limit = settings.top_n if cap is None else cap
+    return orders[:limit]
 
 
 def _params_for(

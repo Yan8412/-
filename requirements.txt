@@ -2,5 +2,6 @@ baostock>=0.8.8
 matplotlib>=3.8
 numpy>=1.26
 requests>=2.31
+scikit-learn>=1.6
 streamlit>=1.32
 pytest>=8.0

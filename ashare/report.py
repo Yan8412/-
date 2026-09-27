@@ -187,12 +187,14 @@ def write_recommendations_markdown(path: Path, rows: list[dict], preface: list[s
         lines.append("今天没有符合条件的候选。空仓是允许的结果。")
     else:
         lines.append(
-            "| 代码 | 名称 | 策略 | 得分 | 买入下限 | 买入上限 | 止盈 | 止损 | 最长持有 | 建议股数 | 预估金额 |"
+            "| 代码 | 名称 | 策略 | 得分 | 模型分数 | 买入下限 | 买入上限 | 止盈 | 止损 | 最长持有 | 建议股数 | 预估金额 |"
         )
-        lines.append("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+        lines.append("| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
         for row in rows:
+            model_score = row.get("model_score")
+            model_cell = "—" if model_score is None else f"{float(model_score):.4f}"
             lines.append(
-                f"| {row['code']} | {row['name']} | {row['strategy']} | {row['score']:.1f} | "
+                f"| {row['code']} | {row['name']} | {row['strategy']} | {row['score']:.1f} | {model_cell} | "
                 f"{row['entry_low']:.2f} | {row['entry_high']:.2f} | {row['take_profit']:.2f} | "
                 f"{row['stop_loss']:.2f} | {row['max_hold_days']} | {row['shares']} | {row['budget']:.0f} |"
             )
@@ -212,6 +214,7 @@ def write_recommendations_csv(path: Path, rows: list[dict]) -> None:
         "名称",
         "策略",
         "得分",
+        "模型分数",
         "理由",
         "建议买入下限",
         "建议买入上限",
@@ -233,6 +236,7 @@ def write_recommendations_csv(path: Path, rows: list[dict]) -> None:
                     "名称": row["name"],
                     "策略": row["strategy"],
                     "得分": f"{row['score']:.2f}",
+                    "模型分数": "" if row.get("model_score") is None else f"{float(row['model_score']):.4f}",
                     "理由": row["reason"],
                     "建议买入下限": f"{row['entry_low']:.2f}",
                     "建议买入上限": f"{row['entry_high']:.2f}",

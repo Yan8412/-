@@ -15,5 +15,9 @@
   "min_listed_bars": 120,
   "top_n": 10,
   "universe_size": 50,
-  "history_bars": 700
+  "history_bars": 700,
+  "regime_breadth_min": 0.4,
+  "regime_ma_window": 20,
+  "regime_min_names": 200,
+  "ml_pool": 80
 }

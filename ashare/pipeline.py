@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -20,7 +22,9 @@ from ashare.config import Settings
 from ashare.data.sources import MarketData
 from ashare.data.universe import coverage_notes, load_catalog, select_for_download
 from ashare.market import SymbolSeries, build_symbol, mark_listing_censorship, master_calendar
+from ashare.ranker import load_ranker, score_candidate
 from ashare.rules.limits import is_risk_name
+from ashare.sentiment import MarketPanel, attach_inferred_st, build_market_panel, market_day_payload
 from ashare.report import (
     render_backtest_report,
     write_equity_chart,
@@ -30,7 +34,7 @@ from ashare.report import (
 from ashare.rules.lots import suggest_shares
 from ashare.rules.money import money
 from ashare.strategies.base import Strategy
-from ashare.strategies.library import builtin_strategies
+from ashare.strategies.library import builtin_strategies, core_strategies
 
 logger = logging.getLogger(__name__)
 
@@ -136,10 +140,11 @@ def build_recommendations(
     settings: Settings,
     day: date,
     strategies: list[Strategy] | None = None,
+    cap: int | None = None,
 ) -> list[dict]:
     strategies = strategies or builtin_strategies()
     bundled = [(item, item.default_params()) for item in strategies]
-    orders = _collect_signals({item.code: item for item in symbols}, day, bundled, settings, None)
+    orders = _collect_signals({item.code: item for item in symbols}, day, bundled, settings, None, cap=cap)
     rows: list[dict] = []
     for order in orders:
         series = next(item for item in symbols if item.code == order.code)
@@ -169,6 +174,7 @@ def build_recommendations(
                 "max_hold_days": order.max_hold_days,
                 "shares": shares,
                 "budget": float(money(shares * price)),
+                "model_score": None,
             }
         )
     return rows
@@ -182,23 +188,36 @@ def run_daily(
     paper_path: Path | None,
 ) -> Path:
     symbols, notes, _chosen, _stats = load_universe(settings, today, cache_dir)
+    attach_inferred_st(symbols)
+    panel = build_market_panel(symbols, settings)
     day = latest_common_day(symbols)
-    rows = build_recommendations(symbols, settings, day)
-    preface = [
-        f"信号日：{day.isoformat()}（使用该日收盘数据，委托目标是之后的第一个交易日开盘）。",
-        f"资金按 {settings.initial_capital:.0f} 元、最多 {settings.max_positions} 只、单票不超过净值的 {settings.max_position_pct:.0%} 估算。",
-        "买入区间是相对信号日收盘价的容许开盘价。开盘涨停、高开超出上限、低开超出下限都不会成交。",
-        "止盈价和止损价按买入区间中位数估算；模拟盘成交后会按真实成交价重算。",
-        "以下股票已排除：ST、次新、停牌、收盘涨停、收盘跌停、价格或成交额不适合该资金量的标的、近20日振幅不足 10% 的低波动股票。",
-    ]
-    if notes:
-        preface.append("数据备注：" + "；".join(notes[:6]))
+    return publish_daily(symbols, panel, settings, day, report_dir, paper_path, notes)
+
+
+def publish_daily(
+    symbols: list[SymbolSeries],
+    panel: MarketPanel,
+    settings: Settings,
+    day: date,
+    report_dir: Path,
+    paper_path: Path | None,
+    notes: list[str],
+) -> Path:
+    """Write the shortlist for one close. Paper orders are skipped when the regime is off."""
+    pool = max(settings.ml_pool, settings.top_n)
+    rows = build_recommendations(symbols, settings, day, core_strategies(), cap=pool)
+    model = load_ranker()
+    rows = _rank_rows(rows, symbols, panel, model, settings)
+    info = panel.days.get(day)
+    risk_on = bool(info.risk_on) if info is not None else False
+    preface = _daily_preface(settings, day, info, model, risk_on, notes)
     report_dir.mkdir(parents=True, exist_ok=True)
+    _write_market_snapshot(report_dir, day, info, model is not None)
     markdown = report_dir / f"daily_{day.isoformat()}.md"
     csv_path = report_dir / f"daily_{day.isoformat()}.csv"
     write_recommendations_markdown(markdown, rows, preface)
     write_recommendations_csv(csv_path, rows)
-    if paper_path is not None and rows:
+    if paper_path is not None and rows and risk_on:
         broker = PaperBroker(paper_path, settings)
         requests = [
             OrderRequest(
@@ -215,12 +234,85 @@ def run_daily(
                 take_profit_pct=row["take_profit_pct"],
                 stop_loss_pct=row["stop_loss_pct"],
                 max_hold_days=row["max_hold_days"],
-                score=row["score"],
+                score=row["model_score"] if row.get("model_score") is not None else row["score"],
             )
             for row in rows
         ]
         broker.place_orders(requests)
     return markdown
+
+
+def _rank_rows(
+    rows: list[dict],
+    symbols: list[SymbolSeries],
+    panel: MarketPanel,
+    model: dict | None,
+    settings: Settings,
+) -> list[dict]:
+    if model is None:
+        for row in rows:
+            row["model_score"] = None
+        return rows[: settings.top_n]
+    by_code = {item.code: item for item in symbols}
+    for row in rows:
+        series = by_code[row["code"]]
+        index = series.date_index[date.fromisoformat(row["signal_date"])]
+        row["model_score"] = score_candidate(
+            model, series, index, row["strategy_id"], float(row["score"]), panel
+        )
+    rows.sort(key=lambda item: float(item["model_score"]), reverse=True)
+    return rows[: settings.top_n]
+
+
+def _daily_preface(settings: Settings, day: date, info, model: dict | None, risk_on: bool, notes: list[str]) -> list[str]:
+    if risk_on:
+        regime = "行情过滤：允许开新仓（站上 MA20 的股票不少于设定比例，且等权指数在均线之上）。"
+    else:
+        regime = "今日不开新仓。候选和分数仍列在下面，供核对，这次不会写入模拟盘。"
+    if model is None:
+        model_line = "模型未训练，排序用的是规则分。训练命令：python -m ashare train。"
+    else:
+        model_line = f"模型分数来自梯度提升树，训练截止 {model.get('trained_through', '未知')}（该日之前已经平仓的交易）。"
+    preface = [
+        f"信号日：{day.isoformat()}（使用该日收盘数据，委托目标是之后的第一个交易日开盘）。",
+        "候选来自首板次日承接和均线回踩。有模型时按模型分数保留前几名。",
+        regime,
+        _sentiment_line(info),
+        model_line,
+        f"资金按 {settings.initial_capital:.0f} 元、最多 {settings.max_positions} 只、单票不超过净值的 {settings.max_position_pct:.0%} 估算。",
+        "买入区间是相对信号日收盘价的容许开盘价。开盘涨停、高开超出上限、低开超出下限都不会成交。",
+        "止盈价和止损价按买入区间中位数估算；模拟盘成交后会按真实成交价重算。",
+        "以下股票已排除：名称中的 ST、按 5% 封板推断的 ST 日期、次新、停牌、收盘涨停、收盘跌停、价格或成交额不适合该资金量的标的、近20日振幅不足 10% 的低波动股票。",
+    ]
+    if notes:
+        preface.append("数据备注：" + "；".join(notes[:6]))
+    return preface
+
+
+def _sentiment_line(info) -> str:
+    if info is None:
+        return "没有该日的市场状态。"
+    prev = "无" if not math.isfinite(info.prev_limit_return) else f"{info.prev_limit_return * 100:.2f}%"
+    versus = "无" if not math.isfinite(info.index_vs_ma) else f"{info.index_vs_ma * 100:.2f}%"
+    breadth = "无" if not math.isfinite(info.breadth) else f"{info.breadth * 100:.1f}%"
+    return (
+        f"涨停 {info.limit_up_count} 家，炸板率 {info.broken_rate * 100:.1f}%，"
+        f"最高连板 {info.max_height}，昨日涨停今日平均涨跌 {prev}，"
+        f"站上 MA20 的比例 {breadth}（{info.breadth_count} 只），等权指数相对均线 {versus}。"
+    )
+
+
+def _write_market_snapshot(report_dir: Path, day: date, info, model_ready: bool) -> None:
+    if info is None:
+        return
+    payload = market_day_payload(day, info)
+    payload["model_ready"] = model_ready
+    payload["entry_note"] = "允许开新仓" if info.risk_on else "今日不开新仓"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "market_latest.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def run_research(

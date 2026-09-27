@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import altair as alt
 import pandas as pd
 import streamlit as st
 
-from ashare.dashboard_data import latest_shortlist, load_backtest_bundle, load_ledger, sell_hint
+from ashare.dashboard_data import latest_shortlist, load_backtest_bundle, load_json_object, load_ledger, sell_hint
+from ashare.paths import cache_dir, default_config_path, ledger_path, report_dir
 
-REPORT_DIR = Path(os.environ.get("ASHARE_REPORT_DIR", "reports"))
-LEDGER_PATH = Path(os.environ.get("ASHARE_LEDGER", "data/paper/ledger.json"))
-CACHE_DIR = Path(os.environ.get("ASHARE_CACHE_DIR", "data/cache"))
+REPORT_DIR = report_dir()
+LEDGER_PATH = ledger_path()
+CACHE_DIR = cache_dir()
 BUNDLE_NAME = "backtest_latest.json"
 
 
@@ -97,6 +97,7 @@ def _equity_chart(frame: pd.DataFrame, title: str) -> alt.Chart:
 def page_shortlist() -> None:
     st.header("今日候选")
     st.caption("收盘信号，委托目标是下一个交易日的开盘价。涨停开盘、或开盘价落在区间外，都不会成交。")
+    _market_banner()
     path, rows = latest_shortlist(REPORT_DIR)
     if st.button("运行收盘更新", type="primary"):
         _run_daily_update()
@@ -118,10 +119,11 @@ def page_shortlist() -> None:
         "预估金额",
         "收盘价",
         "得分",
+        "模型分数",
     ]
     columns = [name for name in preferred if name in frame.columns]
     show = frame[columns].copy()
-    for name in ("建议买入下限", "建议买入上限", "止盈价", "止损价", "收盘价", "预估金额", "得分"):
+    for name in ("建议买入下限", "建议买入上限", "止盈价", "止损价", "收盘价", "预估金额", "得分", "模型分数"):
         if name in show.columns:
             show[name] = pd.to_numeric(show[name], errors="coerce")
     if "建议股数" in show.columns:
@@ -146,7 +148,7 @@ def _run_daily_update() -> None:
     from ashare.config import load_settings
     from ashare.pipeline import run_daily
 
-    settings = load_settings(Path("config.json"))
+    settings = load_settings(default_config_path())
     with st.spinner("正在更新行情并重算候选。这只写模拟盘委托，不会向券商下单。"):
         try:
             written = run_daily(settings, date.today(), CACHE_DIR, REPORT_DIR, LEDGER_PATH)
@@ -172,6 +174,64 @@ def _render_sample(rows: list[dict], title: str, key: str, empty_message: str) -
     st.altair_chart(_equity_chart(shown, title), use_container_width=True)
 
 
+def _market_banner() -> None:
+    snapshot = load_json_object(REPORT_DIR / "market_latest.json")
+    if not snapshot:
+        st.info("还没有行情状态。运行 python -m ashare daily 之后，这里会显示过滤结果和涨停情绪。")
+        return
+    note = snapshot.get("entry_note") or ""
+    if snapshot.get("risk_on"):
+        st.success(f"{snapshot.get('date', '')} {note}")
+    else:
+        st.warning(f"{snapshot.get('date', '')} {note or '今日不开新仓'}")
+    breadth = snapshot.get("breadth")
+    versus = snapshot.get("index_vs_ma")
+    prev = snapshot.get("prev_limit_return")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("站上 MA20", "—" if breadth is None else f"{float(breadth) * 100:.1f}%")
+    c2.metric("涨停家数", int(snapshot.get("limit_up_count") or 0))
+    c3.metric("炸板率", f"{float(snapshot.get('broken_rate') or 0) * 100:.1f}%")
+    c4.metric("最高连板", int(snapshot.get("max_height") or 0))
+    extra = []
+    if versus is not None:
+        extra.append(f"等权指数相对均线 {float(versus) * 100:.2f}%")
+    if prev is not None:
+        extra.append(f"昨日涨停今日平均 {float(prev) * 100:.2f}%")
+    if snapshot.get("model_ready"):
+        extra.append("排序模型已加载")
+    else:
+        extra.append("排序模型未训练，候选按规则分")
+    if extra:
+        st.caption(" · ".join(extra))
+
+
+def _regime_section() -> None:
+    payload = load_json_object(REPORT_DIR / "regime_ml_latest.json")
+    if not payload or not payload.get("comparison"):
+        return
+    st.subheader("行情过滤与模型排序")
+    st.caption("这组和上面的五策略回测分开。样本外只评估了一次，参数没有按这段结果再调。")
+    table = []
+    window_name = {"full": "全样本", "oos": "样本外"}
+    for row in payload["comparison"]:
+        table.append(
+            {
+                "方案": row.get("label", ""),
+                "区间": window_name.get(row.get("window", ""), row.get("window", "")),
+                "总收益": _pct(float(row.get("total_return") or 0)),
+                "最大回撤": _pct(float(row.get("max_drawdown") or 0)),
+                "成交笔数": int(row.get("trade_count") or 0),
+                "胜率": _pct(float(row.get("win_rate") or 0)),
+                "平均盈利": _cny(float(row.get("avg_win") or 0)),
+                "平均亏损": _cny(float(row.get("avg_loss") or 0)),
+            }
+        )
+    st.dataframe(pd.DataFrame(table), hide_index=True, use_container_width=True)
+    for row in payload["comparison"]:
+        if row.get("window") == "oos" and row.get("verdict"):
+            st.write(f"{row.get('label', '')}：{row['verdict']}")
+
+
 def page_backtest() -> None:
     st.header("回测")
     st.caption("左边这一组和右边这一组不要混着看。全样本用的是事先定好的默认参数；样本外的参数只在更早的训练窗口里挑选。")
@@ -190,6 +250,7 @@ def page_backtest() -> None:
         st.info("样本太短，没有走出样本外窗口。")
     else:
         _render_sample(oos_rows, "样本外权益", "oos_strategies", "样本外没有权益曲线。")
+    _regime_section()
     notes = bundle.get("notes") or []
     if notes:
         with st.expander("数据说明"):

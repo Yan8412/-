@@ -7,6 +7,8 @@ from dataclasses import asdict, dataclass, fields
 from datetime import date
 from pathlib import Path
 
+from ashare.paths import default_config_path
+
 
 @dataclass
 class Settings:
@@ -46,6 +48,12 @@ class Settings:
     train_days: int = 140
     test_days: int = 70
     min_trades_for_selection: int = 5
+    # Frozen before the 2025-04-25 holdout was read. New entries require both
+    # conditions, and at least regime_min_names names in the breadth count.
+    regime_breadth_min: float = 0.40
+    regime_ma_window: int = 20
+    regime_min_names: int = 200
+    ml_pool: int = 80
 
     def slot_budget(self, equity: float, cash: float) -> float:
         """Cash allocated to one new position, capped by the account rules."""
@@ -57,7 +65,7 @@ class Settings:
 def load_settings(path: Path | None = None) -> Settings:
     """Load optional JSON overrides. Unknown keys are ignored."""
     settings = Settings()
-    candidate = path or Path("config.json")
+    candidate = path if path is not None else default_config_path()
     if not candidate.exists():
         return settings
     payload = json.loads(candidate.read_text(encoding="utf-8"))

@@ -27,6 +27,15 @@ def save_backtest_bundle(
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
+def load_json_object(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
 def load_backtest_bundle(path: Path) -> dict | None:
     if not path.exists():
         return None

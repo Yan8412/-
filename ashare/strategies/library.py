@@ -523,3 +523,11 @@ def builtin_strategies() -> list[Strategy]:
         MacdGolden(),
         ShrinkReversal(),
     ]
+
+
+def core_strategies() -> list[Strategy]:
+    """Rules kept as candidate generators for the regime filter and the ranker.
+
+    The other three strategies stay available for the original backtest.
+    """
+    return [FirstBoardFollow(), MaPullback()]
