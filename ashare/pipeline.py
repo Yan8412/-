@@ -9,12 +9,18 @@ from pathlib import Path
 
 from ashare.backtest.engine import BacktestResult, _collect_signals, run_backtest
 from ashare.dashboard_data import save_backtest_bundle
-from ashare.backtest.walkforward import run_walk_forward
+from ashare.backtest.walkforward import (
+    FoldOutcome,
+    build_walk_forward_schedules,
+    run_oos_backtest,
+)
 from ashare.broker.base import OrderRequest
 from ashare.broker.paper import PaperBroker
 from ashare.config import Settings
 from ashare.data.sources import MarketData
+from ashare.data.universe import coverage_notes, load_catalog, select_for_download
 from ashare.market import SymbolSeries, build_symbol, mark_listing_censorship, master_calendar
+from ashare.rules.limits import is_risk_name
 from ashare.report import (
     render_backtest_report,
     write_equity_chart,
@@ -29,7 +35,16 @@ from ashare.strategies.library import builtin_strategies
 logger = logging.getLogger(__name__)
 
 
-def load_universe(settings: Settings, today: date, cache_dir: Path) -> tuple[list[SymbolSeries], list[str]]:
+def load_universe(
+    settings: Settings, today: date, cache_dir: Path
+) -> tuple[list[SymbolSeries], list[str], list, dict]:
+    if settings.full_market:
+        return _load_full_market(settings, today, cache_dir)
+    symbols, notes = _load_liquid_sample(settings, today, cache_dir)
+    return symbols, notes, [], {}
+
+
+def _load_liquid_sample(settings: Settings, today: date, cache_dir: Path) -> tuple[list[SymbolSeries], list[str]]:
     source = MarketData(cache_dir)
     candidates = source.list_liquid_names(
         settings.universe_size, settings.price_min, settings.price_max
@@ -59,6 +74,54 @@ def load_universe(settings: Settings, today: date, cache_dir: Path) -> tuple[lis
     if not symbols:
         raise RuntimeError("没有下载到任何可用日线，无法生成推荐或回测。")
     return symbols, notes
+
+
+def _load_full_market(
+    settings: Settings, today: date, cache_dir: Path
+) -> tuple[list[SymbolSeries], list[str], list, dict]:
+    source = MarketData(cache_dir, tencent_interval=0.12, sina_interval=0.12)
+    catalog, notes = load_catalog(cache_dir, today, source)
+    notes.extend(source.notes)
+    chosen, stats = select_for_download(catalog, today)
+    fetched = source.fetch_many(
+        [item.code for item in chosen],
+        settings.history_bars,
+        today,
+        workers=4,
+    )
+    symbols: list[SymbolSeries] = []
+    too_short = 0
+    st_skipped = 0
+    for item in chosen:
+        outcome = fetched.get(item.code)
+        if outcome is None or isinstance(outcome, BaseException):
+            item.error = "无数据" if outcome is None else str(outcome)
+            continue
+        item.bars = len(outcome)
+        item.last_bar = outcome[-1].date.isoformat() if outcome else None
+        if is_risk_name(item.name):
+            st_skipped += 1
+            continue
+        if len(outcome) < settings.min_history_bars + 5:
+            too_short += 1
+            continue
+        series = build_symbol(item.code, item.name, outcome)
+        series.ipo_date = item.ipo()
+        series.out_date = item.out()
+        symbols.append(series)
+        if len(symbols) % 500 == 0:
+            logger.info("已整理 %s 只日线", len(symbols))
+    stats["too_short"] = too_short
+    stats["st_skipped"] = st_skipped
+    mark_listing_censorship(symbols)
+    if not symbols:
+        raise RuntimeError("没有下载到任何可用日线，无法生成推荐或回测。")
+    notes.append(
+        "主行情源为腾讯日线（不复权，含除权信息）；单只失败时改用新浪日线。"
+        "退市代码来自 Baostock 的上市/退市日期，日线仍向腾讯请求。"
+        "2026-09-27 探测东财 push2his 得到空响应，本次运行没有访问东财。"
+    )
+    return symbols, notes, chosen, stats
 
 
 def latest_common_day(symbols: list[SymbolSeries]) -> date:
@@ -118,7 +181,7 @@ def run_daily(
     report_dir: Path,
     paper_path: Path | None,
 ) -> Path:
-    symbols, notes = load_universe(settings, today, cache_dir)
+    symbols, notes, _chosen, _stats = load_universe(settings, today, cache_dir)
     day = latest_common_day(symbols)
     rows = build_recommendations(symbols, settings, day)
     preface = [
@@ -126,7 +189,7 @@ def run_daily(
         f"资金按 {settings.initial_capital:.0f} 元、最多 {settings.max_positions} 只、单票不超过净值的 {settings.max_position_pct:.0%} 估算。",
         "买入区间是相对信号日收盘价的容许开盘价。开盘涨停、高开超出上限、低开超出下限都不会成交。",
         "止盈价和止损价按买入区间中位数估算；模拟盘成交后会按真实成交价重算。",
-        "以下股票已排除：ST、次新、停牌、收盘涨停、收盘跌停、价格或成交额不适合该资金量的标的。",
+        "以下股票已排除：ST、次新、停牌、收盘涨停、收盘跌停、价格或成交额不适合该资金量的标的、近20日振幅不足 10% 的低波动股票。",
     ]
     if notes:
         preface.append("数据备注：" + "；".join(notes[:6]))
@@ -167,7 +230,7 @@ def run_research(
     report_dir: Path,
     start: date | None = None,
 ) -> Path:
-    symbols, notes = load_universe(settings, today, cache_dir)
+    symbols, notes, chosen, stats = load_universe(settings, today, cache_dir)
     calendar = master_calendar(symbols)
     end = calendar[-1]
     start = start or date(end.year - 2, end.month, min(end.day, 28))
@@ -175,9 +238,10 @@ def run_research(
     # start is early enough.
     if start < calendar[0]:
         start = calendar[0]
+    if chosen:
+        notes.extend(coverage_notes(chosen, stats, start, end, len(symbols)))
     strategies = builtin_strategies()
     full: list[BacktestResult] = []
-    oos_pairs = []
     for strategy in strategies:
         logger.info("全样本回测 %s", strategy.name)
         result = run_backtest(
@@ -188,10 +252,7 @@ def run_research(
             end,
         )
         full.append(result)
-        logger.info("走步样本外 %s", strategy.name)
-        oos, folds = run_walk_forward(symbols, strategy, settings, start, end, calendar)
-        oos_pairs.append((oos, folds))
-    logger.info("组合回测")
+    logger.info("组合全样本")
     combined = run_backtest(
         symbols,
         [(item, item.default_params()) for item in strategies],
@@ -200,6 +261,30 @@ def run_research(
         end,
         label="五策略组合",
     )
+    logger.info("走步选参（各策略独立，组合复用同一组冻结参数）")
+    folds, schedules, outcomes = build_walk_forward_schedules(
+        symbols, strategies, settings, start, end, calendar
+    )
+    oos_pairs: list[tuple[BacktestResult, list[FoldOutcome]]] = []
+    for strategy in strategies:
+        logger.info("走步样本外 %s", strategy.name)
+        oos = run_oos_backtest(
+            symbols, [strategy], settings, folds, schedules, start, end
+        )
+        oos_pairs.append((oos, outcomes[strategy.id]))
+    logger.info("组合走步样本外")
+    combined_oos = run_oos_backtest(
+        symbols,
+        strategies,
+        settings,
+        folds,
+        schedules,
+        start,
+        end,
+        label="五策略组合",
+    )
+    combined_folds = [item for strategy in strategies for item in outcomes[strategy.id]]
+    oos_pairs.append((combined_oos, combined_folds))
     report_dir.mkdir(parents=True, exist_ok=True)
     chart_names: dict[str, str] = {}
     for result in full + [combined]:
@@ -217,8 +302,10 @@ def run_research(
         "主板/创业板/北交所以 100 股为一手；科创板以 200 股为最小买入单位。",
         "T+1：买入当日不能卖。开盘价达到涨停价的买单作废。最高价仍不超过跌停价的卖单作废并顺延。",
         "止损和止盈同一天都碰到时，按先止损计算。",
-        f"样本区间 {start.isoformat()} 至 {end.isoformat()}。价格带 {settings.price_min:.0f}–{settings.price_max:.0f} 元，信号日成交额不低于 {settings.min_amount / 1e8:.2f} 亿元。",
+        f"样本区间 {start.isoformat()} 至 {end.isoformat()}。信号日价格带 {settings.price_min:.0f}–{settings.price_max:.0f} 元，成交额不低于 {settings.min_amount / 1e8:.2f} 亿元，近20日振幅不低于 {settings.min_swing_20d:.0%}。",
+        "组合样本外不是五条策略参数的全排列。每一折先为每条策略单独选参，再把这五组参数放在同一个账户里交易。",
     ]
+    comparison = _baseline_lines(report_dir)
     body = render_backtest_report(
         full_results=full,
         oos_results=oos_pairs,
@@ -227,11 +314,20 @@ def run_research(
         universe=[(item.code, item.name) for item in symbols],
         assumptions=assumptions,
         chart_names=chart_names,
+        comparison=comparison,
     )
     path = report_dir / f"backtest_{start.strftime('%Y%m%d')}_{end.strftime('%Y%m%d')}.md"
     path.write_text(body, encoding="utf-8")
     save_backtest_bundle(report_dir / "backtest_latest.json", full + [combined], oos_pairs, notes)
     return path
+
+
+def _baseline_lines(report_dir: Path) -> list[str]:
+    path = report_dir / "baseline_50_sample.md"
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8").strip()
+    return [text, ""]
 
 
 def settle_paper(settings: Settings, cache_dir: Path, paper_path: Path, today: date) -> list[str]:

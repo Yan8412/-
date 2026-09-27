@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
+from ashare.filters import limit_down_mask, limit_up_mask
 from ashare.market import SymbolSeries
 from ashare.rules.limits import is_limit_down, is_limit_up
 from ashare.strategies.base import Signal, Strategy
@@ -28,6 +31,7 @@ def _return(series: SymbolSeries, index: int) -> float | None:
 class FirstBoardFollow(Strategy):
     """Yesterday was a first limit-up; today is a bullish candle that did not seal again."""
 
+    vectorized = True
     id = "first_board_follow"
     name = "首板次日承接"
     summary = "昨日首次涨停，今日收阳且未再次封板，次日开盘才考虑买入。"
@@ -81,10 +85,44 @@ class FirstBoardFollow(Strategy):
         )
         return _pack(score, reason, params)
 
+    def scores(self, series: SymbolSeries, params: dict) -> np.ndarray:
+        n = len(series.close)
+        out = np.full(n, np.nan, dtype=float)
+        if n < 3:
+            return out
+        up = limit_up_mask(series)
+        down = limit_down_mask(series)
+        up_prev = np.zeros(n, dtype=bool)
+        up_prev2 = np.zeros(n, dtype=bool)
+        up_prev[1:] = up[:-1]
+        up_prev2[2:] = up[:-2]
+        change = _change_array(series)
+        previous_volume = np.zeros(n, dtype=float)
+        previous_volume[1:] = series.volume[:-1]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = series.volume / previous_volume
+        index = np.arange(n)
+        keep = (
+            (index >= 2)
+            & up_prev
+            & ~up_prev2
+            & ~up
+            & ~down
+            & (series.close > series.open)
+            & np.isfinite(change)
+            & (change >= params["min_ret"])
+            & (change <= params["max_ret"])
+            & (previous_volume > 0)
+            & (ratio <= params["max_vol_ratio"])
+        )
+        out[keep] = 60.0 + change[keep] * 80.0
+        return out
+
 
 class Breakout60(Strategy):
     """Close breaks the prior 60-session high on qfq prices, with volume confirmation."""
 
+    vectorized = True
     id = "breakout_60"
     name = "放量突破60日高"
     summary = "除权连续价收盘突破过去60个交易日最高价，且放量、收盘靠近最高价，当日未涨停。"
@@ -136,10 +174,51 @@ class Breakout60(Strategy):
         )
         return _pack(score, reason, params)
 
+    def scores(self, series: SymbolSeries, params: dict) -> np.ndarray:
+        n = len(series.close)
+        out = np.full(n, np.nan, dtype=float)
+        if n < 61:
+            return out
+        windows = np.lib.stride_tricks.sliding_window_view(series.qfq_high, 60).max(axis=1)
+        prior = np.full(n, np.nan, dtype=float)
+        prior[60:] = windows[: n - 60]
+        change = _change_array(series)
+        base = np.full(n, np.nan, dtype=float)
+        base[1:] = series.vol_ma5[:-1]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = series.volume / base
+        span = series.high - series.low
+        position = np.ones(n, dtype=float)
+        nonzero = span > 0
+        position[nonzero] = (series.close[nonzero] - series.low[nonzero]) / span[nonzero]
+        index = np.arange(n)
+        keep = (
+            (index >= 60)
+            & np.isfinite(prior)
+            & (series.qfq_close > prior)
+            & np.isfinite(change)
+            & (change >= params["min_ret"])
+            & (change <= params["max_ret"])
+            & np.isfinite(base)
+            & (base > 0)
+            & (ratio >= params["vol_ratio"])
+            & (position >= params["close_pos"])
+        )
+        extension = np.zeros(n, dtype=float)
+        good_prior = np.isfinite(prior) & (prior != 0)
+        extension[good_prior] = series.qfq_close[good_prior] / prior[good_prior] - 1.0
+        out[keep] = (
+            55.0
+            + np.minimum(change[keep], 0.1) * 100.0
+            + np.minimum(extension[keep], 0.05) * 80.0
+        )
+        return out
+
 
 class MaPullback(Strategy):
     """Uptrend pullback that tags MA20 and closes back above it."""
 
+    vectorized = True
     id = "ma_pullback"
     name = "均线回踩"
     summary = "MA5>MA20>MA60 且均线向上，当日回踩 MA20 后收阳站回，未涨停。"
@@ -191,10 +270,40 @@ class MaPullback(Strategy):
         )
         return _pack(score, reason, params)
 
+    def scores(self, series: SymbolSeries, params: dict) -> np.ndarray:
+        n = len(series.close)
+        out = np.full(n, np.nan, dtype=float)
+        if n < 2:
+            return out
+        ma20_prev = _shift(series.ma20, 5)
+        change = _change_array(series)
+        finite = (
+            np.isfinite(series.ma5)
+            & np.isfinite(series.ma20)
+            & np.isfinite(series.ma60)
+            & np.isfinite(ma20_prev)
+        )
+        keep = (
+            finite
+            & (series.ma5 > series.ma20)
+            & (series.ma20 > series.ma60)
+            & (series.ma20 > ma20_prev)
+            & (series.qfq_low <= series.ma20 * (1.0 + params["proximity"]))
+            & (series.qfq_close >= series.ma20)
+            & (series.close > series.open)
+            & np.isfinite(change)
+            & (change > 0)
+            & (change <= params["max_ret"])
+        )
+        distance = np.abs(series.qfq_close / series.ma20 - 1.0)
+        out[keep] = 50.0 + (params["proximity"] - distance[keep]) * 200.0 + change[keep] * 40.0
+        return out
+
 
 class MacdGolden(Strategy):
     """MACD golden cross below zero while price holds MA20."""
 
+    vectorized = True
     id = "macd_golden"
     name = "MACD零下金叉"
     summary = "DIF 在零轴下方上穿 DEA，收盘仍在 MA20 之上且放量，当日未涨停。"
@@ -248,10 +357,46 @@ class MacdGolden(Strategy):
         reason = f"MACD 在{where}金叉，收盘站上 MA20，当日涨幅 {change * 100:.1f}%，未涨停。"
         return _pack(score, reason, params)
 
+    def scores(self, series: SymbolSeries, params: dict) -> np.ndarray:
+        n = len(series.close)
+        out = np.full(n, np.nan, dtype=float)
+        if n < 2:
+            return out
+        dif_prev = _shift(series.dif, 1)
+        dea_prev = _shift(series.dea, 1)
+        base = _shift(series.vol_ma5, 1)
+        change = _change_array(series)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = series.volume / base
+        finite = (
+            np.isfinite(series.dif)
+            & np.isfinite(series.dea)
+            & np.isfinite(dif_prev)
+            & np.isfinite(dea_prev)
+            & np.isfinite(series.ma20)
+        )
+        keep = (
+            finite
+            & (dif_prev <= dea_prev)
+            & (series.dif > series.dea)
+            & (series.qfq_close >= series.ma20)
+            & np.isfinite(base)
+            & (base > 0)
+            & (ratio >= params["min_vol_ratio"])
+            & np.isfinite(change)
+            & (change > 0)
+        )
+        if params.get("below_zero", True):
+            keep &= series.dif < 0
+        delta = series.dif - dif_prev
+        out[keep] = 48.0 + np.minimum(delta[keep], 0.5) * 20.0 + change[keep] * 50.0
+        return out
+
 
 class ShrinkReversal(Strategy):
     """Three shrinking down days inside an uptrend, then an expanding bullish day."""
 
+    vectorized = True
     id = "shrink_reversal"
     name = "缩量回调再放量"
     summary = "MA20 向上，连续三日缩量回调后，今日放量收阳且未涨停。"
@@ -305,6 +450,57 @@ class ShrinkReversal(Strategy):
             f"上升趋势中连续三日缩量回落，今日放量收阳，涨幅 {change * 100:.1f}%，未涨停。"
         )
         return _pack(score, reason, params)
+
+    def scores(self, series: SymbolSeries, params: dict) -> np.ndarray:
+        n = len(series.close)
+        out = np.full(n, np.nan, dtype=float)
+        if n < 26:
+            return out
+        ma20_prev = _shift(series.ma20, 5)
+        close_1 = _shift(series.qfq_close, 1)
+        close_2 = _shift(series.qfq_close, 2)
+        close_3 = _shift(series.qfq_close, 3)
+        vol_1 = _shift(series.volume, 1)
+        vol_2 = _shift(series.volume, 2)
+        vol_3 = _shift(series.volume, 3)
+        change = _change_array(series)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            expand = series.volume / vol_1
+        index = np.arange(n)
+        keep = (
+            (index >= 25)
+            & np.isfinite(series.ma20)
+            & np.isfinite(ma20_prev)
+            & (series.ma20 > ma20_prev)
+            & (close_1 < close_2)
+            & (close_2 < close_3)
+            & (vol_1 < vol_2)
+            & (vol_2 < vol_3)
+            & (series.close > series.open)
+            & (vol_1 > 0)
+            & (expand >= params["expand"])
+            & (series.qfq_close >= series.ma20)
+            & np.isfinite(change)
+            & (change > 0)
+            & (change <= params["max_ret"])
+        )
+        out[keep] = 52.0 + expand[keep] * 4.0 + change[keep] * 40.0
+        return out
+
+
+def _shift(values: np.ndarray, bars: int) -> np.ndarray:
+    out = np.full(len(values), np.nan, dtype=float)
+    if bars <= 0 or bars >= len(values):
+        return out
+    out[bars:] = values[:-bars]
+    return out
+
+
+def _change_array(series: SymbolSeries) -> np.ndarray:
+    out = np.full(len(series.close), np.nan, dtype=float)
+    ok = series.preclose > 0
+    out[ok] = series.close[ok] / series.preclose[ok] - 1.0
+    return out
 
 
 def _pack(score: float, reason: str, params: dict) -> Signal:

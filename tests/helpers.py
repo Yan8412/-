@@ -57,6 +57,7 @@ def loose_settings(**overrides) -> Settings:
         min_amount=0.0,
         min_history_bars=5,
         min_listed_bars=5,
+        min_swing_20d=0.0,
         top_n=10,
         min_trades_for_selection=5,
         train_days=20,

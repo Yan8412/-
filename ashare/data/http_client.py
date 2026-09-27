@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from typing import Any
 
@@ -13,12 +14,14 @@ class RateLimiter:
     def __init__(self, min_interval: float) -> None:
         self.min_interval = min_interval
         self._next = 0.0
+        self._lock = threading.Lock()
 
     def wait(self) -> None:
-        now = time.monotonic()
-        if now < self._next:
-            time.sleep(self._next - now)
-        self._next = time.monotonic() + self.min_interval
+        with self._lock:
+            now = time.monotonic()
+            if now < self._next:
+                time.sleep(self._next - now)
+            self._next = time.monotonic() + self.min_interval
 
 
 def fetch_text(url: str, limiter: RateLimiter, timeout: float = 20.0) -> str:

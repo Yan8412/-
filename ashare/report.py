@@ -75,6 +75,7 @@ def render_backtest_report(
     universe: list[tuple[str, str]],
     assumptions: list[str],
     chart_names: dict[str, str],
+    comparison: list[str] | None = None,
 ) -> str:
     lines = [
         "# A股短线回测报告",
@@ -87,12 +88,15 @@ def render_backtest_report(
     ]
     lines.extend(f"- {item}" for item in assumptions)
     lines.extend(["", "## 股票池", ""])
-    lines.append(f"共 {len(universe)} 只，按当时成交额从高到低筛选，价格落在账户能买得起的区间。")
+    lines.append(f"进入回测的股票共 {len(universe)} 只。能不能买，按信号当天的价格、成交额、停牌、涨跌停和上市天数判断。")
     lines.append("")
-    lines.append("| 代码 | 名称 |")
-    lines.append("| --- | --- |")
-    for code, name in universe:
-        lines.append(f"| {code} | {name} |")
+    if len(universe) > 80:
+        lines.append("名单过长，报告不逐行展开。覆盖情况写在文末。")
+    else:
+        lines.append("| 代码 | 名称 |")
+        lines.append("| --- | --- |")
+        for code, name in universe:
+            lines.append(f"| {code} | {name} |")
     lines.extend(["", "## 全样本（默认参数）", "", metrics_header()])
     for result in full_results:
         lines.append(metrics_row(result.strategy_name, summarize(result)))
@@ -120,8 +124,8 @@ def render_backtest_report(
             lines.extend(["", f"{result.strategy_name} 没有形成有效的走步窗口。"])
             continue
         lines.extend(["", f"### {result.strategy_name} 的参数选择", ""])
-        lines.append("| 测试区间 | 训练目标值 | 最大持有天数 | 其他关键参数 | 训练期笔数 |")
-        lines.append("| --- | ---: | ---: | --- | ---: |")
+        lines.append("| 策略 | 测试区间 | 训练目标值 | 最大持有天数 | 其他关键参数 | 训练期笔数 |")
+        lines.append("| --- | --- | ---: | ---: | --- | ---: |")
         for outcome in folds:
             params = outcome.chosen_params
             extra = ", ".join(
@@ -130,7 +134,8 @@ def render_backtest_report(
                 if key not in {"max_hold_days", "entry_low_pct", "entry_high_pct", "stop_loss_pct"}
             )
             lines.append(
-                f"| {outcome.fold.test_start} ~ {outcome.fold.test_end} | "
+                f"| {outcome.strategy_name or outcome.strategy_id} | "
+                f"{outcome.fold.test_start} ~ {outcome.fold.test_end} | "
                 f"{outcome.train_score:.3f} | {params.get('max_hold_days', '')} | {extra} | "
                 f"{outcome.train_metrics.trade_count} |"
             )
@@ -157,6 +162,9 @@ def render_backtest_report(
             lines.append(f"- {reason}: {count}")
     else:
         lines.append("- 无")
+    if comparison:
+        lines.extend(["", "## 对照：上一版 50 只高成交额样本", ""])
+        lines.extend(comparison)
     lines.extend(["", "## 数据与局限", ""])
     if notes:
         lines.extend(f"- {note}" for note in notes)
@@ -164,9 +172,7 @@ def render_backtest_report(
         lines.append("- 数据源没有记录额外异常。")
     lines.extend(
         [
-            "- 股票池按运行当日的成交额筛选，已退市股票不会出现，存在幸存者偏差。",
             "- 没有逐笔行情，涨停开板又封死的日内过程用日线近似，真实成交会更差一些。",
-            "- 当前名称不含 ST 不代表历史上从未被 ST。",
             "",
         ]
     )

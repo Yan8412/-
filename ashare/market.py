@@ -49,6 +49,10 @@ class SymbolSeries:
     dif: np.ndarray = field(default_factory=lambda: np.array([]))
     dea: np.ndarray = field(default_factory=lambda: np.array([]))
     vol_ma5: np.ndarray = field(default_factory=lambda: np.array([]))
+    swing20: np.ndarray = field(default_factory=lambda: np.array([]))
+    ipo_date: date | None = None
+    out_date: date | None = None
+    st_flags: np.ndarray | None = None
     date_index: dict[date, int] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -146,6 +150,19 @@ def _ema_skip_nan(dif: np.ndarray, start: int, window: int) -> np.ndarray:
     return ema(tail, window)
 
 
+def rolling_swing(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: int = 20) -> np.ndarray:
+    """(rolling high - rolling low) / close, using only bars up to each index."""
+    out = np.full(len(close), np.nan, dtype=float)
+    if window <= 0 or len(close) < window:
+        return out
+    highs = np.lib.stride_tricks.sliding_window_view(high, window).max(axis=1)
+    lows = np.lib.stride_tricks.sliding_window_view(low, window).min(axis=1)
+    denom = close[window - 1 :]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out[window - 1 :] = (highs - lows) / denom
+    return out
+
+
 def prepare_indicators(series: SymbolSeries) -> None:
     close = series.qfq_close
     series.ma5 = sma(close, 5)
@@ -153,6 +170,7 @@ def prepare_indicators(series: SymbolSeries) -> None:
     series.ma60 = sma(close, 60)
     series.dif, series.dea = macd_lines(close)
     series.vol_ma5 = sma(series.volume, 5)
+    series.swing20 = rolling_swing(series.high, series.low, series.close, 20)
 
 
 def mark_listing_censorship(symbols: list[SymbolSeries]) -> None:
@@ -162,13 +180,20 @@ def mark_listing_censorship(symbols: list[SymbolSeries]) -> None:
     the download boundary, so the IPO date is unknown and the new-listing
     filter does not apply. Names that appear well after that boundary are
     blocked until ``min_listed_bars`` real sessions have printed.
+
+    When Baostock supplies an IPO date and the first bar is that listing, the
+    new-listing rule applies even if some other name in the universe starts earlier.
     """
     if not symbols:
         return
-    earliest = min(item.dates[0] for item in symbols if item.dates)
+    dated = [item.dates[0] for item in symbols if item.dates]
+    earliest = min(dated) if dated else None
     for item in symbols:
-        if not item.dates:
+        if not item.dates or earliest is None:
             item.left_censored = True
+            continue
+        if item.ipo_date is not None and item.dates[0] <= item.ipo_date + timedelta(days=15):
+            item.left_censored = False
             continue
         item.left_censored = item.dates[0] <= earliest + timedelta(days=20)
 

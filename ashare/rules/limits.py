@@ -32,7 +32,7 @@ def classify_board(code: str) -> str:
         return "b_share"
     if symbol.startswith(("688", "689")):
         return "star"
-    if symbol.startswith(("300", "301")):
+    if symbol.startswith(("300", "301", "302")):
         return "chinext"
     if symbol.startswith(("43", "82", "83", "87", "88", "92")):
         return "bj"

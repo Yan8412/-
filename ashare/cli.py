@@ -27,7 +27,7 @@ def main(argv: list[str] | None = None) -> int:
 
     daily = sub.add_parser("daily", help="收盘后更新数据并写出下一交易日候选")
     daily.add_argument("--top", type=int, default=None)
-    daily.add_argument("--universe", type=int, default=None)
+    daily.add_argument("--universe", type=int, default=None, help="只用成交额前 N 只；省略则扫描全市场")
     daily.add_argument("--report-dir", type=Path, default=Path("reports"))
     daily.add_argument("--cache-dir", type=Path, default=Path("data/cache"))
     daily.add_argument("--paper", type=Path, default=Path("data/paper/ledger.json"))
@@ -35,7 +35,7 @@ def main(argv: list[str] | None = None) -> int:
 
     backtest = sub.add_parser("backtest", help="用已实现的规则跑历史回测和走步样本外")
     backtest.add_argument("--start", default=None, help="YYYY-MM-DD，默认大约两年")
-    backtest.add_argument("--universe", type=int, default=None)
+    backtest.add_argument("--universe", type=int, default=None, help="只用成交额前 N 只；省略则扫描全市场")
     backtest.add_argument("--report-dir", type=Path, default=Path("reports"))
     backtest.add_argument("--cache-dir", type=Path, default=Path("data/cache"))
 
@@ -63,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
             settings.top_n = args.top
         if args.universe is not None:
             settings.universe_size = args.universe
+            settings.full_market = False
         path = run_daily(
             settings,
             today,
@@ -76,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "backtest":
         if args.universe is not None:
             settings.universe_size = args.universe
+            settings.full_market = False
         start = date.fromisoformat(args.start) if args.start else None
         path = run_research(settings, today, args.cache_dir, args.report_dir, start)
         print(f"已写出 {path}")

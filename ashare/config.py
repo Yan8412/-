@@ -35,8 +35,13 @@ class Settings:
     min_amount: float = 30_000_000.0
     min_history_bars: int = 60
     min_listed_bars: int = 120
+    # 20-session high-low range / close. Short-term targets are several percent;
+    # names that only drift a few percent (工商银行 in the previous sample) never
+    # pay for the 5 CNY commission floor. 0 disables the check.
+    min_swing_20d: float = 0.10
     top_n: int = 10
     universe_size: int = 50
+    full_market: bool = True
     history_bars: int = 700
     train_days: int = 140
     test_days: int = 70

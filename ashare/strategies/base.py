@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
 from ashare.market import SymbolSeries
 
 
@@ -23,6 +25,7 @@ class Strategy:
     name: str
     summary: str
     warmup: int = 60
+    vectorized: bool = False
 
     def default_params(self) -> dict:
         raise NotImplementedError
@@ -33,3 +36,12 @@ class Strategy:
 
     def signal(self, series: SymbolSeries, index: int, params: dict) -> Signal | None:
         raise NotImplementedError
+
+    def scores(self, series: SymbolSeries, params: dict) -> np.ndarray:
+        """Score at every bar. NaN means no signal. Override for full-market runs."""
+        out = np.full(len(series.close), np.nan, dtype=float)
+        for index in range(len(series.close)):
+            signal = self.signal(series, index, params)
+            if signal is not None:
+                out[index] = signal.score
+        return out

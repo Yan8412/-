@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
+import numpy as np
+
 from ashare.config import Settings
-from ashare.filters import rejection_reason
+from ashare.filters import eligible_mask, rejection_reason
 from ashare.market import SymbolSeries, master_calendar
 from ashare.rules.costs import buy_cash_out, sell_cash_in
 from ashare.rules.execution import evaluate_buy, evaluate_sell
@@ -112,6 +116,12 @@ def run_backtest(
     cash = money(settings.initial_capital)
     positions: list[Position] = []
     pending: list[PendingBuy] = []
+    fast = all(getattr(strategy, "vectorized", False) for strategy, _params in strategies)
+    book = (
+        _signal_book(list(by_code.values()), strategies, settings, param_schedule)
+        if fast
+        else None
+    )
     trades: list[ClosedTrade] = []
     rejects: dict[str, int] = {}
     equity_dates: list[date] = []
@@ -137,9 +147,10 @@ def run_backtest(
         previous_equity = marked
         if next_day is None:
             continue
-        pending = _collect_signals(
-            by_code, day, strategies, settings, param_schedule
-        )
+        if book is None:
+            pending = _collect_signals(by_code, day, strategies, settings, param_schedule)
+        else:
+            pending = book.get(day, [])
 
     return BacktestResult(
         strategy_id=strategy_id,
@@ -312,6 +323,105 @@ def _mark(
             price = money(D(str(series.close[index])) * (Decimal("1") - D(settings.slippage_rate)))
         total += sell_cash_in(pos.shares, price, day, settings)
     return money(total)
+
+
+def _signal_book(
+    symbols: list[SymbolSeries],
+    strategies: list[tuple[Strategy, dict]],
+    settings: Settings,
+    param_schedule: dict[str, list[tuple[date, date, dict]]] | None,
+) -> dict[date, list[PendingBuy]]:
+    """Precompute the same top-N orders ``_collect_signals`` would emit.
+
+    Used when every strategy publishes a vectorized score array. The daily
+    shortlist still calls ``_collect_signals`` so the written reason stays
+    the Chinese sentence from ``signal``.
+    """
+    eligible = {series.code: eligible_mask(series, settings) for series in symbols}
+    variants: list[tuple[Strategy, dict, tuple]] = []
+    seen: set[tuple] = set()
+    for strategy, default_params in strategies:
+        for params in _param_variants(strategy.id, default_params, param_schedule):
+            key = (strategy.id, _param_token(params))
+            if key in seen:
+                continue
+            seen.add(key)
+            variants.append((strategy, params, key))
+
+    hits: dict[tuple, dict[date, list[tuple[float, SymbolSeries]]]] = {
+        key: defaultdict(list) for _strategy, _params, key in variants
+    }
+    for strategy, params, key in variants:
+        grouped = hits[key]
+        for series in symbols:
+            scores = strategy.scores(series, params)
+            mask = eligible[series.code] & np.isfinite(scores)
+            if strategy.warmup > 0:
+                warmup = np.arange(len(scores)) >= strategy.warmup
+                mask = mask & warmup
+            for index in np.flatnonzero(mask).tolist():
+                grouped[series.dates[index]].append((float(scores[index]), series))
+
+    book: dict[date, list[PendingBuy]] = {}
+    signal_days: set[date] = set()
+    for grouped in hits.values():
+        signal_days.update(grouped)
+    for day in signal_days:
+        best: dict[str, tuple[float, SymbolSeries, Strategy, dict]] = {}
+        for strategy, default_params in strategies:
+            params = _params_for(strategy.id, day, default_params, param_schedule)
+            if params is None:
+                continue
+            key = (strategy.id, _param_token(params))
+            for score, series in hits[key].get(day, ()):
+                current = best.get(series.code)
+                if current is None or score > current[0]:
+                    best[series.code] = (score, series, strategy, params)
+        orders: list[PendingBuy] = []
+        for score, series, strategy, params in best.values():
+            index = series.date_index[day]
+            close = money(series.close[index])
+            orders.append(
+                PendingBuy(
+                    code=series.code,
+                    name=series.name,
+                    strategy_id=strategy.id,
+                    strategy_name=strategy.name,
+                    signal_date=day,
+                    score=score,
+                    entry_low=money(close * (Decimal("1") + D(params["entry_low_pct"]))),
+                    entry_high=money(close * (Decimal("1") + D(params["entry_high_pct"]))),
+                    take_profit_pct=float(params["take_profit_pct"]),
+                    stop_loss_pct=float(params["stop_loss_pct"]),
+                    max_hold_days=int(params["max_hold_days"]),
+                    reason="",
+                )
+            )
+        orders.sort(key=lambda item: item.score, reverse=True)
+        book[day] = orders[: settings.top_n]
+    return book
+
+
+def _param_variants(
+    strategy_id: str,
+    default_params: dict,
+    schedule: dict[str, list[tuple[date, date, dict]]] | None,
+) -> list[dict]:
+    if schedule is None:
+        return [default_params]
+    found: list[dict] = []
+    seen: set[str] = set()
+    for _start, _end, params in schedule.get(strategy_id, []):
+        token = _param_token(params)
+        if token in seen:
+            continue
+        seen.add(token)
+        found.append(params)
+    return found
+
+
+def _param_token(params: dict) -> str:
+    return json.dumps(params, sort_keys=True, default=str)
 
 
 def _collect_signals(

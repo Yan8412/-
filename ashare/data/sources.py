@@ -1,13 +1,14 @@
 """Free daily-bar and snapshot sources.
 
 Primary path is Tencent (does not use Eastmoney). Sina is the fallback for
-both the liquid universe and daily bars. Eastmoney push2his returned an empty
+both the universe list and daily bars. Eastmoney push2his returned an empty
 reply when this project was built (2026-09), so it is not called.
 """
 
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 from ashare.data.http_client import RateLimiter, fetch_json
@@ -28,6 +29,10 @@ SINA_KLINE = (
 SINA_UNIVERSE = (
     "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
     "Market_Center.getHQNodeData?page={page}&num={num}&sort=amount&asc=0&node=hs_a"
+)
+SINA_NODE = (
+    "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+    "Market_Center.getHQNodeData?page={page}&num={num}&sort=symbol&asc=1&node={node}"
 )
 
 
@@ -126,6 +131,80 @@ class MarketData:
         if not found:
             raise RuntimeError("股票池为空。新浪行情列表没有返回可用标的。")
         return [(code, name) for code, name, _amount in found[: limit * 2]]
+
+    def list_node(self, node: str, page_size: int = 100, page_cap: int = 80) -> list[tuple[str, str]]:
+        """Every name Sina returns for one market-center node. Empty on failure."""
+        found: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for page in range(1, page_cap + 1):
+            url = SINA_NODE.format(page=page, num=page_size, node=node)
+            try:
+                payload = fetch_json(url, self.sina_limiter)
+            except Exception as exc:  # noqa: BLE001
+                self.notes.append(f"新浪节点 {node} 第 {page} 页失败: {exc}")
+                break
+            if not isinstance(payload, list) or not payload:
+                break
+            fresh = 0
+            for row in payload:
+                try:
+                    symbol = normalize_code(str(row.get("code") or ""))
+                except ValueError:
+                    continue
+                if symbol in seen:
+                    continue
+                board = classify_board(symbol)
+                if board in {"b_share", "other"}:
+                    continue
+                seen.add(symbol)
+                found.append((symbol, str(row.get("name") or symbol)))
+                fresh += 1
+            if fresh == 0 or len(payload) < page_size:
+                break
+        return found
+
+    def fetch_many(
+        self,
+        codes: list[str],
+        count: int,
+        today: date,
+        workers: int = 4,
+    ) -> dict[str, list[RawBar] | BaseException]:
+        """Download daily bars with a shared rate limit. Cached names are not requested again."""
+        from ashare.data.cache import cache_is_fresh, load_bars
+
+        results: dict[str, list[RawBar] | BaseException] = {}
+        pending: list[str] = []
+        min_bars = min(count, 60)
+        for code in codes:
+            try:
+                symbol = normalize_code(code)
+            except ValueError as exc:
+                results[code] = exc
+                continue
+            cached, fetched_at = load_bars(self.cache_dir, symbol)
+            if cache_is_fresh(cached, fetched_at, today, min_bars):
+                results[symbol] = cached[-count:]
+            else:
+                pending.append(symbol)
+        logger.info("日线缓存命中 %s 只，待下载 %s 只", len(results), len(pending))
+        if not pending:
+            return results
+
+        def job(symbol: str) -> tuple[str, list[RawBar] | BaseException]:
+            try:
+                return symbol, self.get_bars(symbol, count, today)
+            except Exception as exc:  # noqa: BLE001
+                return symbol, exc
+
+        done = 0
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            for symbol, outcome in pool.map(job, pending):
+                results[symbol] = outcome
+                done += 1
+                if done % 200 == 0 or done == len(pending):
+                    logger.info("日线下载进度 %s/%s", done, len(pending))
+        return results
 
     def _tencent_bars(self, code: str, count: int) -> list[RawBar]:
         symbol = tencent_symbol(code)

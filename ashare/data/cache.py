@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -31,7 +32,10 @@ def save_bars(cache_dir: Path, code: str, bars: list[RawBar], source: str) -> No
         "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "bars": [_bar_to_dict(bar) for bar in bars],
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    text = json.dumps(payload, ensure_ascii=False)
+    temporary = path.with_suffix(".json.tmp")
+    temporary.write_text(text, encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def cache_is_fresh(bars: list[RawBar], fetched_at: str | None, today: date, min_bars: int) -> bool:
@@ -40,11 +44,24 @@ def cache_is_fresh(bars: list[RawBar], fetched_at: str | None, today: date, min_
     Weekends and the Mid-Autumn / National Day gaps can leave the last bar
     several calendar days behind ``today``. Six days is enough for a normal
     long weekend; older files are refreshed.
+
+    A delisted name's last bar can be months or years old. If that file was
+    written in the last week it is already the full answer, and downloading
+    it again on every run does not add bars.
     """
     if len(bars) < min_bars or fetched_at is None:
         return False
     last = bars[-1].date
-    return (today - last).days <= 6
+    if (today - last).days <= 6:
+        return True
+    try:
+        fetched = datetime.fromisoformat(fetched_at)
+    except ValueError:
+        return False
+    if fetched.tzinfo is None:
+        fetched = fetched.replace(tzinfo=timezone.utc)
+    age_days = (datetime.now(timezone.utc) - fetched).total_seconds() / 86400.0
+    return age_days <= 7 and (today - last).days > 20
 
 
 def _bar_to_dict(bar: RawBar) -> dict:
