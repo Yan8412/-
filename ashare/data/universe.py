@@ -185,9 +185,16 @@ def coverage_notes(
         "这是为了去掉工商银行这类低波动大盘股，不是按行业名称拉黑。",
     ]
     failures = [item for item in chosen if item.error]
-    if failures:
-        sample = "；".join(f"{item.code} {item.error}" for item in failures[:8])
-        notes.append(f"日线下载失败 {len(failures)} 只。例子：{sample}")
+    short = [item for item in failures if "仅返回" in (item.error or "")]
+    other = [item for item in failures if item not in short]
+    if short:
+        sample = "；".join(f"{item.code} {item.error}" for item in short[:8])
+        notes.append(
+            f"免费日线不足 30 根、因而没有进入回测的有 {len(short)} 只（两边源的根数一致，是次新而不是网络失败）。例子：{sample}"
+        )
+    if other:
+        sample = "；".join(f"{item.code} {item.error}" for item in other[:8])
+        notes.append(f"日线下载失败 {len(other)} 只。例子：{sample}")
     return notes
 
 
