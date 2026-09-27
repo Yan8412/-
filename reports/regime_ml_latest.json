@@ -1,0 +1,458 @@
+{
+  "full_start": "2024-09-24",
+  "full_end": "2026-09-24",
+  "oos_start": "2025-04-25",
+  "oos_end": "2026-06-23",
+  "hyperparams": {
+    "max_depth": 3,
+    "min_samples_leaf": 80,
+    "learning_rate": 0.05,
+    "n_estimators": 80
+  },
+  "used_fallback": false,
+  "hyperparam_records": [
+    {
+      "params": {
+        "max_depth": 2,
+        "min_samples_leaf": 40,
+        "learning_rate": 0.05,
+        "n_estimators": 80
+      },
+      "mean_score": 0.0027409183566458164,
+      "folds": [
+        {
+          "train_cut": "2024-05-13",
+          "skipped": "train",
+          "train_rows": 61
+        },
+        {
+          "train_cut": "2024-08-06",
+          "valid_cut": "2024-11-07",
+          "score": 0.010063178788631218,
+          "trades": 224,
+          "days": 56
+        },
+        {
+          "train_cut": "2024-11-07",
+          "valid_cut": "2025-02-10",
+          "score": -0.004581342075339586,
+          "trades": 232,
+          "days": 58
+        }
+      ]
+    },
+    {
+      "params": {
+        "max_depth": 2,
+        "min_samples_leaf": 80,
+        "learning_rate": 0.05,
+        "n_estimators": 100
+      },
+      "mean_score": 0.0037461524548345845,
+      "folds": [
+        {
+          "train_cut": "2024-05-13",
+          "skipped": "train",
+          "train_rows": 61
+        },
+        {
+          "train_cut": "2024-08-06",
+          "valid_cut": "2024-11-07",
+          "score": 0.013653414138736886,
+          "trades": 224,
+          "days": 56
+        },
+        {
+          "train_cut": "2024-11-07",
+          "valid_cut": "2025-02-10",
+          "score": -0.006161109229067717,
+          "trades": 232,
+          "days": 58
+        }
+      ]
+    },
+    {
+      "params": {
+        "max_depth": 3,
+        "min_samples_leaf": 40,
+        "learning_rate": 0.08,
+        "n_estimators": 80
+      },
+      "mean_score": 0.004028922914816151,
+      "folds": [
+        {
+          "train_cut": "2024-05-13",
+          "skipped": "train",
+          "train_rows": 61
+        },
+        {
+          "train_cut": "2024-08-06",
+          "valid_cut": "2024-11-07",
+          "score": 0.010371714359825574,
+          "trades": 224,
+          "days": 56
+        },
+        {
+          "train_cut": "2024-11-07",
+          "valid_cut": "2025-02-10",
+          "score": -0.002313868530193273,
+          "trades": 232,
+          "days": 58
+        }
+      ]
+    },
+    {
+      "params": {
+        "max_depth": 3,
+        "min_samples_leaf": 80,
+        "learning_rate": 0.05,
+        "n_estimators": 80
+      },
+      "mean_score": 0.005594918839390666,
+      "folds": [
+        {
+          "train_cut": "2024-05-13",
+          "skipped": "train",
+          "train_rows": 61
+        },
+        {
+          "train_cut": "2024-08-06",
+          "valid_cut": "2024-11-07",
+          "score": 0.01084934483659329,
+          "trades": 224,
+          "days": 56
+        },
+        {
+          "train_cut": "2024-11-07",
+          "valid_cut": "2025-02-10",
+          "score": 0.0003404928421880424,
+          "trades": 232,
+          "days": 58
+        }
+      ]
+    }
+  ],
+  "importances": [
+    {
+      "feature": "log_limit_up_count",
+      "importance": 0.31671936779582904
+    },
+    {
+      "feature": "prev_limit_return",
+      "importance": 0.17744791471335475
+    },
+    {
+      "feature": "broken_rate",
+      "importance": 0.15460491975895246
+    },
+    {
+      "feature": "breadth",
+      "importance": 0.10648596181904794
+    },
+    {
+      "feature": "index_vs_ma",
+      "importance": 0.09102874666610294
+    },
+    {
+      "feature": "market_max_height",
+      "importance": 0.06059058061483414
+    },
+    {
+      "feature": "log_amount",
+      "importance": 0.03209963821424535
+    },
+    {
+      "feature": "swing20",
+      "importance": 0.020972117380826404
+    },
+    {
+      "feature": "dist_ma20",
+      "importance": 0.016999490369760426
+    },
+    {
+      "feature": "rule_score",
+      "importance": 0.011734763916732798
+    },
+    {
+      "feature": "day_return",
+      "importance": 0.006871890896115046
+    },
+    {
+      "feature": "vol_ratio",
+      "importance": 0.004444607854198702
+    },
+    {
+      "feature": "close_pos",
+      "importance": 0.0
+    },
+    {
+      "feature": "stock_height",
+      "importance": 0.0
+    },
+    {
+      "feature": "strategy_first_board",
+      "importance": 0.0
+    },
+    {
+      "feature": "strategy_pullback",
+      "importance": 0.0
+    },
+    {
+      "feature": "prev_limit_missing",
+      "importance": 0.0
+    },
+    {
+      "feature": "index_ma_missing",
+      "importance": 0.0
+    },
+    {
+      "feature": "board_main",
+      "importance": 0.0
+    },
+    {
+      "feature": "board_chinext",
+      "importance": 0.0
+    },
+    {
+      "feature": "board_star",
+      "importance": 0.0
+    },
+    {
+      "feature": "board_bj",
+      "importance": 0.0
+    }
+  ],
+  "comparison": [
+    {
+      "arm": "baseline",
+      "label": "规则打分",
+      "window": "full",
+      "total_return": -0.3150535,
+      "max_drawdown": -0.44762286347555524,
+      "trade_count": 811,
+      "win_rate": 0.43403205918618987,
+      "avg_win": 245.5352556818182,
+      "avg_loss": -201.44056644880175,
+      "final_equity": 13698.93,
+      "tstat": -0.8490597152808348,
+      "verdict": "样本外总收益不为正，不适合模拟盘。",
+      "start": "2024-09-24",
+      "end": "2026-09-24"
+    },
+    {
+      "arm": "baseline",
+      "label": "规则打分",
+      "window": "oos",
+      "total_return": -0.05624950000000006,
+      "max_drawdown": -0.25848393363947775,
+      "trade_count": 459,
+      "win_rate": 0.43137254901960786,
+      "avg_win": 277.9101515151515,
+      "avg_loss": -215.02823754789273,
+      "final_equity": 18875.01,
+      "tstat": -0.18748205523903969,
+      "verdict": "样本外总收益不为正，不适合模拟盘。",
+      "start": "2025-04-25",
+      "end": "2026-06-23"
+    },
+    {
+      "arm": "regime",
+      "label": "规则打分 + 行情过滤",
+      "window": "full",
+      "total_return": -0.09284850000000011,
+      "max_drawdown": -0.2266727760965006,
+      "trade_count": 541,
+      "win_rate": 0.43068391866913125,
+      "avg_win": 267.12257510729614,
+      "avg_loss": -208.10561688311688,
+      "final_equity": 18143.03,
+      "tstat": -0.3069592293073582,
+      "verdict": "样本外总收益不为正，不适合模拟盘。",
+      "start": "2024-09-24",
+      "end": "2026-09-24"
+    },
+    {
+      "arm": "regime",
+      "label": "规则打分 + 行情过滤",
+      "window": "oos",
+      "total_return": 0.11392999999999986,
+      "max_drawdown": -0.1612607050574797,
+      "trade_count": 325,
+      "win_rate": 0.4430769230769231,
+      "avg_win": 279.4482638888889,
+      "avg_loss": -209.73453038674032,
+      "final_equity": 22278.6,
+      "tstat": 0.4684158278383588,
+      "verdict": "样本外收益为正，但单笔盈亏的 t 统计量绝对值小于 2，统计上还不能说有优势，不适合当成交易依据。",
+      "start": "2025-04-25",
+      "end": "2026-06-23"
+    },
+    {
+      "arm": "regime_ml",
+      "label": "行情过滤 + 模型排序",
+      "window": "full",
+      "total_return": 0.2818750000000001,
+      "max_drawdown": -0.2331375509696192,
+      "trade_count": 397,
+      "win_rate": 0.43073047858942065,
+      "avg_win": 424.7882456140351,
+      "avg_loss": -296.4658849557522,
+      "final_equity": 25637.5,
+      "tstat": 0.6978262395425827,
+      "verdict": "样本外收益为正，但单笔盈亏的 t 统计量绝对值小于 2，统计上还不能说有优势，不适合当成交易依据。",
+      "start": "2024-09-24",
+      "end": "2026-09-24"
+    },
+    {
+      "arm": "regime_ml",
+      "label": "行情过滤 + 模型排序",
+      "window": "oos",
+      "total_return": -0.08008099999999996,
+      "max_drawdown": -0.1781690829511432,
+      "trade_count": 211,
+      "win_rate": 0.4075829383886256,
+      "avg_win": 223.0077906976744,
+      "avg_loss": -166.24232,
+      "final_equity": 18398.38,
+      "tstat": -0.5013526165308839,
+      "verdict": "样本外总收益不为正，不适合模拟盘。",
+      "start": "2025-04-25",
+      "end": "2026-06-23"
+    }
+  ],
+  "per_strategy": [
+    {
+      "strategy": "首板次日承接",
+      "baseline_full": {
+        "total_return": -0.038049,
+        "max_drawdown": -0.3655567503632907,
+        "trade_count": 831,
+        "win_rate": 0.44404332129963897,
+        "avg_win": 314.62254742547424,
+        "avg_loss": -252.06681818181818,
+        "final_equity": 19239.02,
+        "tstat": -0.03887274799930243,
+        "verdict": "样本外总收益不为正，不适合模拟盘。",
+        "start": "2024-09-24",
+        "end": "2026-09-24"
+      },
+      "baseline_oos": {
+        "total_return": -0.0957690000000001,
+        "max_drawdown": -0.27174311444637755,
+        "trade_count": 476,
+        "win_rate": 0.4327731092436975,
+        "avg_win": 272.35859223300974,
+        "avg_loss": -214.8691851851852,
+        "final_equity": 18084.62,
+        "tstat": -0.32448849952840075,
+        "verdict": "样本外总收益不为正，不适合模拟盘。",
+        "start": "2025-04-25",
+        "end": "2026-06-23"
+      },
+      "regime_full": {
+        "total_return": 0.14536349999999998,
+        "max_drawdown": -0.23521291058369787,
+        "trade_count": 556,
+        "win_rate": 0.4442446043165468,
+        "avg_win": 334.8610526315789,
+        "avg_loss": -258.2634627831715,
+        "final_equity": 22907.27,
+        "tstat": 0.367301253362041,
+        "verdict": "样本外收益为正，但单笔盈亏的 t 统计量绝对值小于 2，统计上还不能说有优势，不适合当成交易依据。",
+        "start": "2024-09-24",
+        "end": "2026-09-24"
+      },
+      "regime_oos": {
+        "total_return": 0.11922800000000011,
+        "max_drawdown": -0.18896326599199564,
+        "trade_count": 337,
+        "win_rate": 0.4421364985163205,
+        "avg_win": 289.2097315436242,
+        "avg_loss": -216.53026595744683,
+        "final_equity": 22384.56,
+        "tstat": 0.4601518815953176,
+        "verdict": "样本外收益为正，但单笔盈亏的 t 统计量绝对值小于 2，统计上还不能说有优势，不适合当成交易依据。",
+        "start": "2025-04-25",
+        "end": "2026-06-23"
+      }
+    },
+    {
+      "strategy": "均线回踩",
+      "baseline_full": {
+        "total_return": -0.16282600000000003,
+        "max_drawdown": -0.42074894945487396,
+        "trade_count": 444,
+        "win_rate": 0.4009009009009009,
+        "avg_win": 252.05769662921347,
+        "avg_loss": -179.98372180451128,
+        "final_equity": 16743.48,
+        "tstat": -0.5915339911113916,
+        "verdict": "样本外总收益不为正，不适合模拟盘。",
+        "start": "2024-09-24",
+        "end": "2026-09-24"
+      },
+      "baseline_oos": {
+        "total_return": 0.013076499999999935,
+        "max_drawdown": -0.2642993631887611,
+        "trade_count": 256,
+        "win_rate": 0.40234375,
+        "avg_win": 287.36514563106795,
+        "avg_loss": -192.93764705882353,
+        "final_equity": 20261.53,
+        "tstat": 0.019210205411203673,
+        "verdict": "样本外收益为正，但单笔盈亏的 t 统计量绝对值小于 2，统计上还不能说有优势，不适合当成交易依据。",
+        "start": "2025-04-25",
+        "end": "2026-06-23"
+      },
+      "regime_full": {
+        "total_return": 0.2628030000000001,
+        "max_drawdown": -0.21194325931022506,
+        "trade_count": 283,
+        "win_rate": 0.4204946996466431,
+        "avg_win": 350.1010924369748,
+        "avg_loss": -220.20243902439023,
+        "final_equity": 25256.06,
+        "tstat": 1.0254096159797625,
+        "verdict": "样本外收益为正，但单笔盈亏的 t 统计量绝对值小于 2，统计上还不能说有优势，不适合当成交易依据。",
+        "start": "2024-09-24",
+        "end": "2026-09-24"
+      },
+      "regime_oos": {
+        "total_return": 0.19351049999999992,
+        "max_drawdown": -0.18400283596686962,
+        "trade_count": 183,
+        "win_rate": 0.4207650273224044,
+        "avg_win": 356.344025974026,
+        "avg_loss": -222.34226415094338,
+        "final_equity": 23870.21,
+        "tstat": 0.8846023598487093,
+        "verdict": "样本外收益为正，但单笔盈亏的 t 统计量绝对值小于 2，统计上还不能说有优势，不适合当成交易依据。",
+        "start": "2025-04-25",
+        "end": "2026-06-23"
+      }
+    }
+  ],
+  "st_names_flagged": 117,
+  "train_rows": 11963,
+  "labeled_rows": 33100,
+  "candidate_rows": 39060,
+  "model_ready": true,
+  "notes": [
+    "比较的是同一套默认参数下的首板次日承接和均线回踩，不是五策略走步。三组实验都使用了按 5% 封板推断的 ST 标记，因此差额来自行情过滤和模型排序。",
+    "行情过滤（写死，未按样本外调整）：至少 200 只股票有 MA20，其中收盘在 MA20 之上的比例 ≥ 40%，且等权指数不低于自身 20 日均线。否则不新开仓，已有持仓仍卖出。",
+    "模型是 scikit-learn 的 GradientBoostingRegressor。标签是单笔交易扣费后的收益率，买不进或直到行情结束仍未卖出的信号没有标签。训练行要求信号日和卖出日都早于截止日。",
+    "超参只在 2025-04-25 之前的扩展窗口里挑选。本次使用 {'max_depth': 3, 'min_samples_leaf': 80, 'learning_rate': 0.05, 'n_estimators': 80}。验证折里平均标签更高的格点被留下，相同得分保留更早的格点。",
+    "样本外模型的训练样本是 11963 笔在 2025-04-25 之前已经平仓的交易。样本外区间没有再训练。",
+    "按 5% 涨跌停封板推断、至少有一天像 ST 的股票有 117 只。这不是交易所的 ST 名单。当前名称里带 ST 的股票仍然整段排除。创业板、科创板和北交所没有 5% 档，不打这个标记。",
+    "样本外账户从区间前一个交易日的收盘开始，本金仍按 2 万元计，这样区间第一天的开盘可以成交。总收益的分母是 2 万元，不是区间第一天的权益。",
+    "t 统计量是已平仓交易盈亏的均值除以标准误（样本标准差，分母 n-1）。它描述这一段历史里这些交易的离散程度，不是未来还会重复的证明。",
+    "股票池目录使用 catalog.json 缓存，共 5906 只。",
+    "主行情源为腾讯日线（不复权，含除权信息）；单只失败时改用新浪日线。退市代码来自 Baostock 的上市/退市日期，日线仍向腾讯请求。2026-09-27 探测东财 push2his 得到空响应，本次运行没有访问东财。",
+    "目录 5906 只，其中当前仍上市 5569 只，Baostock 标记已退市 337 只。",
+    "退市早于回看起点（约 1200 个自然日）而未下载的有 201 只。",
+    "实际发起日线下载 5705 只，进入回测 5325 只。K线短于策略所需而跳过 25 只。当前风险名称整段跳过 329 只。板块：bj 347、chinext 1431、main 3306、star 621。",
+    "样本 2024-09-24 至 2026-09-24 内需要覆盖的退市股票 52 只：日线覆盖到样本起点之后的 49 只，有日线但最后一根早于样本起点的 3 只，免费日线没有返回的 0 只。",
+    "当前名称含 ST、*ST 或退市字样的有 482 只。腾讯和新浪日线没有逐日 ST 字段。Baostock 有逐日 isST，但单只查询实测约 0.8 秒，全市场大约要一小时，这次没有拉取。这些股票仍按当前名称整段排除。这一轮在 5% 封板近似之外，没有交易所的逐日 ST 名单。",
+    "停牌日在腾讯日线里通常直接缺 bar，回测按当天没有行情处理，不使用未来的复牌价。"
+  ]
+}

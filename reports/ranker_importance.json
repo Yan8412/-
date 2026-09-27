@@ -1,0 +1,100 @@
+{
+  "trained_through": "2025-04-25",
+  "params": {
+    "max_depth": 3,
+    "min_samples_leaf": 80,
+    "learning_rate": 0.05,
+    "n_estimators": 80
+  },
+  "used_fallback": false,
+  "importances": [
+    {
+      "feature": "log_limit_up_count",
+      "importance": 0.31671936779582904
+    },
+    {
+      "feature": "prev_limit_return",
+      "importance": 0.17744791471335475
+    },
+    {
+      "feature": "broken_rate",
+      "importance": 0.15460491975895246
+    },
+    {
+      "feature": "breadth",
+      "importance": 0.10648596181904794
+    },
+    {
+      "feature": "index_vs_ma",
+      "importance": 0.09102874666610294
+    },
+    {
+      "feature": "market_max_height",
+      "importance": 0.06059058061483414
+    },
+    {
+      "feature": "log_amount",
+      "importance": 0.03209963821424535
+    },
+    {
+      "feature": "swing20",
+      "importance": 0.020972117380826404
+    },
+    {
+      "feature": "dist_ma20",
+      "importance": 0.016999490369760426
+    },
+    {
+      "feature": "rule_score",
+      "importance": 0.011734763916732798
+    },
+    {
+      "feature": "day_return",
+      "importance": 0.006871890896115046
+    },
+    {
+      "feature": "vol_ratio",
+      "importance": 0.004444607854198702
+    },
+    {
+      "feature": "close_pos",
+      "importance": 0.0
+    },
+    {
+      "feature": "stock_height",
+      "importance": 0.0
+    },
+    {
+      "feature": "strategy_first_board",
+      "importance": 0.0
+    },
+    {
+      "feature": "strategy_pullback",
+      "importance": 0.0
+    },
+    {
+      "feature": "prev_limit_missing",
+      "importance": 0.0
+    },
+    {
+      "feature": "index_ma_missing",
+      "importance": 0.0
+    },
+    {
+      "feature": "board_main",
+      "importance": 0.0
+    },
+    {
+      "feature": "board_chinext",
+      "importance": 0.0
+    },
+    {
+      "feature": "board_star",
+      "importance": 0.0
+    },
+    {
+      "feature": "board_bj",
+      "importance": 0.0
+    }
+  ]
+}

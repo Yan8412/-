@@ -1,0 +1,15 @@
+{
+  "date": "2026-09-24",
+  "risk_on": false,
+  "breadth": 0.3997361477572559,
+  "breadth_count": 5306,
+  "limit_up_count": 51,
+  "broken_count": 137,
+  "broken_rate": 0.7287234042553191,
+  "max_height": 5,
+  "prev_limit_return": 0.005530142372643254,
+  "index_level": 152.46850775404096,
+  "index_vs_ma": 0.0029381778917314527,
+  "model_ready": true,
+  "entry_note": "今日不开新仓"
+}
