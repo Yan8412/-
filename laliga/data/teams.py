@@ -15,6 +15,7 @@ import unicodedata
 _ALIAS_PAIRS = {
     "ath madrid": "atletico madrid",
     "atletico madrid": "atletico madrid",
+    "atletico de madrid": "atletico madrid",
     "club atletico de madrid": "atletico madrid",
     "ath bilbao": "athletic club",
     "athletic club": "athletic club",
@@ -87,7 +88,10 @@ _ALIAS_PAIRS = {
     "sporting de gijon": "sporting gijon",
     "la coruna": "deportivo la coruna",
     "deportivo la coruna": "deportivo la coruna",
+    "deportivo a coruna": "deportivo la coruna",
+    "deportivo de la coruna": "deportivo la coruna",
     "rc deportivo": "deportivo la coruna",
+    "rc deportivo a coruna": "deportivo la coruna",
     "rc deportivo de la coruna": "deportivo la coruna",
     "deportivo": "deportivo la coruna",
     "oviedo": "real oviedo",
@@ -167,6 +171,12 @@ OVERLAP_FOOTBALL_DATA_NAMES = (
 
 _CANONICALS = tuple(sorted(set(_ALIAS_PAIRS.values())))
 SYNTHETIC_TEAM_IDS = {name: 8_000_001 + index for index, name in enumerate(_CANONICALS)}
+# Dropped only after an exact alias miss. "a" stays, so "Deportivo A Coruña"
+# is not reduced to a different club. Exact keys such as "deportivo alaves"
+# and "deportivo" are resolved before this list is used.
+_NAME_PARTICLES = frozenset(
+    {"de", "del", "la", "el", "cf", "fc", "ud", "cd", "rcd", "ca", "sd", "rc", "club", "balompie", "sad"}
+)
 
 
 def normalize_team_name(name: str) -> str:
@@ -182,10 +192,13 @@ def canonical_team(name: str) -> str:
     """Map a football-data or SportMonks name onto one canonical key."""
 
     key = normalize_team_name(name)
-    try:
-        return _ALIAS_PAIRS[key]
-    except KeyError as exc:
-        raise KeyError(f"没有球队对照：{name}") from exc
+    found = _ALIAS_PAIRS.get(key)
+    if found is None:
+        stripped = " ".join(token for token in key.split() if token not in _NAME_PARTICLES)
+        found = _ALIAS_PAIRS.get(stripped)
+    if found is None:
+        raise KeyError(f"没有球队对照：{name}")
+    return found
 
 
 def team_id_for(name: str, sportmonks_ids: dict[str, int] | None = None) -> int:

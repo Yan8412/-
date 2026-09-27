@@ -105,30 +105,57 @@ def import_history(
 
     if until is None:
         until = pd.Timestamp.now(tz="UTC").year
-    texts: list[str] = []
+    downloaded: list[tuple[int, str]] = []
     seen_success = False
     for year in range(since, until + 1):
         try:
-            texts.append(download_season(year, root, refresh=refresh, fetch=fetch))
+            downloaded.append((year, download_season(year, root, refresh=refresh, fetch=fetch)))
             seen_success = True
         except HistoryError as exc:
             if not seen_success or "404" not in str(exc):
                 raise
             break
-    if not texts:
+    if not downloaded:
         raise HistoryError(f"没有下载到 {since} 之后的西甲 CSV。")
-    football = parse_seasons(texts)
+    football = parse_seasons(
+        [text for _year, text in downloaded],
+        [year for year, _text in downloaded],
+    )
     built = build_history(football, sportmonks if sportmonks is not None else pd.DataFrame())
     _write_history(root, built.frame)
     return built
 
 
-def parse_seasons(texts: list[str]) -> pd.DataFrame:
-    frames = [_parse_csv(text) for text in texts]
-    frames = [frame for frame in frames if not frame.empty]
+def parse_seasons(texts: list[str], season_starts: list[int] | None = None) -> pd.DataFrame:
+    """Parse SP1 texts. ``season_starts`` is the year in each file name (1213 -> 2012).
+
+    The kickoff month is not a season. The 2019/20 restart was played in July 2020,
+    and inferring the season from that month collides with 2020/21 fixture ids.
+    """
+
+    if season_starts is None or len(season_starts) != len(texts):
+        raise HistoryError("每一份 SP1 CSV 都要带上文件名里的赛季起始年，不能从开球月份推断。")
+    frames = []
+    columns: list[str] = []
+    for text, season_start in zip(texts, season_starts, strict=True):
+        frame = _parse_csv(text, int(season_start))
+        if frame.empty:
+            continue
+        if not columns:
+            columns = list(frame.columns)
+        # A season with no PSH column is all-NA there. Concatenating that with a
+        # season that has prices emits a pandas FutureWarning and, later, may
+        # change dtype. Drop the empty columns here and put them back afterwards.
+        frames.append(frame.dropna(axis=1, how="all"))
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    combined = pd.concat(frames, ignore_index=True)
+    for column in columns:
+        if column not in combined.columns:
+            combined[column] = pd.NA
+    if combined["fd_fixture_id"].duplicated().any():
+        raise HistoryError("合成的 fixture_id 撞车了。同一赛季起始年不能解析两份 CSV。")
+    return combined
 
 
 def build_history(football: pd.DataFrame, sportmonks: pd.DataFrame) -> HistoryBuild:
@@ -138,6 +165,13 @@ def build_history(football: pd.DataFrame, sportmonks: pd.DataFrame) -> HistoryBu
         raise HistoryError("没有可合并的历史比赛。")
     sport = sportmonks if sportmonks is not None else pd.DataFrame()
     ids, unmapped = _sportmonks_ids(sport)
+    overlap_unmapped = _unmapped_overlap_names(football, sport)
+    if overlap_unmapped:
+        listed = "、".join(overlap_unmapped)
+        raise HistoryError(
+            "SportMonks 里这些队名落在 football-data 也覆盖的赛季，但对不上队名。"
+            f"导入已停止，避免同一场比赛写两行：{listed}"
+        )
     indexed, ambiguous = _index_sportmonks(sport)
     used: set[int] = set()
     mismatches: list[dict] = []
@@ -148,7 +182,7 @@ def build_history(football: pd.DataFrame, sportmonks: pd.DataFrame) -> HistoryBu
     if not football.empty:
         ordered = football.sort_values(["starting_at", "fd_home", "fd_away"])
         for record in ordered.itertuples(index=False):
-            key = (str(record.madrid_date), record.canonical_home, record.canonical_away)
+            key = (str(record.match_date), record.canonical_home, record.canonical_away)
             if key in seen_keys:
                 duplicates += 1
                 continue
@@ -187,6 +221,9 @@ def build_history(football: pd.DataFrame, sportmonks: pd.DataFrame) -> HistoryBu
             fixture_id = int(matched["fixture_id"])
             if fixture_id in used or str(matched.get("status") or "") not in {"finished", "scheduled"}:
                 continue
+            key = _sportmonks_key(matched)
+            if key is not None and key in seen_keys:
+                continue
             home_name = str(matched.get("home_team_name") or "")
             away_name = str(matched.get("away_team_name") or "")
             try:
@@ -200,9 +237,15 @@ def build_history(football: pd.DataFrame, sportmonks: pd.DataFrame) -> HistoryBu
             base["ft_score_mismatch"] = 0
             _set_fair_price(base)
             rows.append(base)
+            if key is not None:
+                seen_keys.add(key)
     frame = pd.DataFrame(rows)
     if frame.empty:
         raise HistoryError("合并后没有比赛。")
+    if frame["fixture_id"].duplicated().any():
+        duplicated = frame.loc[frame["fixture_id"].duplicated(keep=False), "fixture_id"].drop_duplicates()
+        listed = "、".join(str(int(item)) for item in duplicated.head(8))
+        raise HistoryError(f"合并后的比赛表有重复的 fixture_id，无法对齐赛前特征：{listed}")
     frame["starting_at"] = pd.to_datetime(frame["starting_at"], utc=True)
     frame = frame.sort_values(["starting_at", "fixture_id"]).reset_index(drop=True)
     seasons = sorted({str(value) for value in frame["season_name"].dropna() if str(value)})
@@ -252,7 +295,7 @@ def format_history_build(built: HistoryBuild) -> str:
         lines.append(f"football-data 里同一天同一对球队的重复行：{built.duplicate_football_data}，已丢掉多余的。")
     if built.unmapped_sportmonks:
         names = "、".join(built.unmapped_sportmonks[:12])
-        lines.append(f"SportMonks 队名还没有对照，这些场保留原 id、不与 football-data 合并：{names}")
+        lines.append(f"SportMonks 队名还没有对照，这些场不在 football-data 覆盖的赛季里，保留原 id：{names}")
     lines.append(f"文件：processed/{HISTORY_FILENAME}。每日 fetch 不会读它，也不会改它。")
     return "\n".join(lines)
 
@@ -271,9 +314,10 @@ def _fetch_url(url: str) -> str:
         raise HistoryError(f"下载失败 {url}：{exc.reason}") from exc
 
 
-def _parse_csv(text: str) -> pd.DataFrame:
+def _parse_csv(text: str, season_start: int) -> pd.DataFrame:
     reader = csv.DictReader(io.StringIO(text.lstrip("\ufeff")))
     rows = []
+    season_name = f"{season_start}/{season_start + 1}"
     for raw in reader:
         if (raw.get("Div") or "").strip() not in {"", "SP1"}:
             continue
@@ -286,23 +330,24 @@ def _parse_csv(text: str) -> pd.DataFrame:
             canonical_away = canonical_team(away)
         except KeyError as exc:
             raise HistoryError(str(exc)) from exc
-        kickoff, madrid_date, season_start = _kickoff(raw)
-        if kickoff is None:
+        kickoff, match_date = _kickoff(raw)
+        if kickoff is None or match_date is None:
             continue
         ft_home = _int_cell(raw.get("FTHG"))
         ft_away = _int_cell(raw.get("FTAG"))
         if ft_home is None or ft_away is None:
             continue
+        # 100_000 ids per season, so row 324 of 2019/20 cannot equal row 324 of 2020/21.
         row = {
-            "fd_fixture_id": 9_000_000_000 + season_start * 10_000 + len(rows) + 1,
+            "fd_fixture_id": 9_000_000_000 + season_start * 100_000 + len(rows) + 1,
             "fd_home": home,
             "fd_away": away,
             "canonical_home": canonical_home,
             "canonical_away": canonical_away,
             "starting_at": kickoff,
-            "madrid_date": madrid_date,
+            "match_date": match_date,
             "season_start": season_start,
-            "season_name": f"{season_start}/{season_start + 1}",
+            "season_name": season_name,
             "home_goals_ft": ft_home,
             "away_goals_ft": ft_away,
             "home_goals_ht": _int_cell(raw.get("HTHG")),
@@ -318,7 +363,14 @@ def _parse_csv(text: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _kickoff(raw: dict) -> tuple[pd.Timestamp | None, str | None, int | None]:
+def _kickoff(raw: dict) -> tuple[pd.Timestamp | None, str | None]:
+    """football-data Time is UK local time (Europe/London), not Madrid.
+
+    The Date cell is the match date printed in the CSV. That date, not the
+    Madrid clock, is what lines up with a SportMonks kickoff's Madrid date
+    for a normal La Liga evening.
+    """
+
     date_text = (raw.get("Date") or "").strip()
     time_text = (raw.get("Time") or "").strip() or "16:00"
     parsed = None
@@ -329,16 +381,72 @@ def _kickoff(raw: dict) -> tuple[pd.Timestamp | None, str | None, int | None]:
         except (ValueError, TypeError):
             continue
     if parsed is None or pd.isna(parsed):
-        return None, None, None
+        return None, None
     clock = time_text if len(time_text) == 5 else "16:00"
+    match_date = parsed.date().isoformat()
     try:
-        local = pd.Timestamp(f"{parsed.date().isoformat()} {clock}").tz_localize(
-            "Europe/Madrid", nonexistent="shift_forward", ambiguous=True
+        local = pd.Timestamp(f"{match_date} {clock}").tz_localize(
+            "Europe/London", nonexistent="shift_forward", ambiguous=True
         )
     except Exception:
-        local = pd.Timestamp(f"{parsed.date().isoformat()} 16:00").tz_localize("Europe/Madrid")
-    season_start = int(local.year if local.month >= 7 else local.year - 1)
-    return local.tz_convert("UTC"), local.date().isoformat(), season_start
+        local = pd.Timestamp(f"{match_date} 16:00").tz_localize("Europe/London")
+    return local.tz_convert("UTC"), match_date
+
+
+def _season_start_from_name(name) -> int | None:
+    text = str(name or "").strip()
+    if "/" not in text:
+        return None
+    left, _right = text.split("/", 1)
+    left = left.strip()
+    if len(left) == 4 and left.isdigit():
+        return int(left)
+    return None
+
+
+def _row_season_start(row, kickoff: pd.Timestamp | None = None) -> int:
+    """Prefer the stored season name. The kickoff month is only a last resort."""
+
+    named = _season_start_from_name(row.get("season_name"))
+    if named is not None:
+        return named
+    if "season_start" in getattr(row, "index", ()) and pd.notna(row.get("season_start")):
+        try:
+            return int(row.get("season_start"))
+        except (TypeError, ValueError):
+            pass
+    if kickoff is None:
+        raw = row.get("starting_at")
+        if raw is None or pd.isna(raw):
+            return 0
+        kickoff = pd.Timestamp(raw)
+        if kickoff.tzinfo is None:
+            kickoff = kickoff.tz_localize("UTC")
+        else:
+            kickoff = kickoff.tz_convert("UTC")
+    local = kickoff.tz_convert("Europe/Madrid")
+    return int(local.year if local.month >= 7 else local.year - 1)
+
+
+def _unmapped_overlap_names(football: pd.DataFrame, sport: pd.DataFrame) -> list[str]:
+    """Unmapped SportMonks names whose season is also present in the SP1 files."""
+
+    if football is None or football.empty or sport is None or sport.empty:
+        return []
+    covered = {int(value) for value in football["season_start"].dropna().unique()}
+    names: set[str] = set()
+    for _, row in sport.iterrows():
+        if _row_season_start(row) not in covered:
+            continue
+        for column in ("home_team_name", "away_team_name"):
+            name = str(row.get(column) or "").strip()
+            if not name:
+                continue
+            try:
+                canonical_team(name)
+            except KeyError:
+                names.add(name)
+    return sorted(names)
 
 
 def _sportmonks_ids(frame: pd.DataFrame) -> tuple[dict[str, int], list[str]]:
@@ -364,6 +472,25 @@ def _sportmonks_ids(frame: pd.DataFrame) -> tuple[dict[str, int], list[str]]:
     return chosen, sorted(unmapped)
 
 
+def _sportmonks_key(row) -> tuple | None:
+    """Madrid civil date plus canonical team names. Unmapped names return None."""
+
+    try:
+        home = canonical_team(str(row.get("home_team_name") or ""))
+        away = canonical_team(str(row.get("away_team_name") or ""))
+    except KeyError:
+        return None
+    kickoff = row.get("starting_at")
+    if kickoff is None or pd.isna(kickoff):
+        return None
+    kickoff = pd.Timestamp(kickoff)
+    if kickoff.tzinfo is None:
+        kickoff = kickoff.tz_localize("UTC")
+    else:
+        kickoff = kickoff.tz_convert("UTC")
+    return (kickoff.tz_convert("Europe/Madrid").date().isoformat(), home, away)
+
+
 def _index_sportmonks(frame: pd.DataFrame) -> tuple[dict[tuple, pd.Series], set[tuple]]:
     indexed: dict[tuple, pd.Series] = {}
     ambiguous: set[tuple] = set()
@@ -373,16 +500,9 @@ def _index_sportmonks(frame: pd.DataFrame) -> tuple[dict[tuple, pd.Series], set[
     for _, row in finished.iterrows():
         if pd.isna(row.get("home_goals_ft")) or pd.isna(row.get("away_goals_ft")):
             continue
-        try:
-            home = canonical_team(str(row.get("home_team_name") or ""))
-            away = canonical_team(str(row.get("away_team_name") or ""))
-        except KeyError:
+        key = _sportmonks_key(row)
+        if key is None:
             continue
-        kickoff = pd.Timestamp(row["starting_at"])
-        if kickoff.tzinfo is None:
-            kickoff = kickoff.tz_localize("UTC")
-        madrid = kickoff.tz_convert("Europe/Madrid")
-        key = (madrid.date().isoformat(), home, away)
         if key in indexed or key in ambiguous:
             ambiguous.add(key)
             indexed.pop(key, None)
@@ -397,8 +517,7 @@ def _sportmonks_base(row: pd.Series, home_id: int, away_id: int) -> dict:
         kickoff = kickoff.tz_localize("UTC")
     else:
         kickoff = kickoff.tz_convert("UTC")
-    madrid = kickoff.tz_convert("Europe/Madrid")
-    season_start = madrid.year if madrid.month >= 7 else madrid.year - 1
+    season_start = _row_season_start(row, kickoff)
     base = _empty_odds()
     base.update(
         {
@@ -470,7 +589,7 @@ def _copy_odds(base: dict, record) -> None:
     for group in _ODDS_GROUPS:
         for side in ("home", "draw", "away"):
             value = getattr(record, f"{group}_{side}")
-            base[f"{group}_{side}"] = None if value is None or (isinstance(value, float) and pd.isna(value)) else float(value)
+            base[f"{group}_{side}"] = None if value is None or pd.isna(value) else float(value)
 
 
 def _set_fair_price(base: dict) -> int:

@@ -278,3 +278,39 @@ def test_comparison_rows_share_the_post_warmup_sample():
     assert "Dixon–Coles（混合同一批）" in rendered
     assert "线性混合 − 赛前赔率（去水位）" in rendered
     json.dumps(report.to_dict())
+
+
+def test_power_blend_pairs_are_stored_once():
+    proportional = (0.55, 0.25, 0.20)
+    power = (0.70, 0.18, 0.12)
+    rows = []
+    for offset in range(60):
+        rows.append(
+            {
+                "fixture_id": offset + 1,
+                "match_day": "2024-05-01",
+                "y_ft": 0,
+                "dixon_coles_ft_probs": proportional,
+                "market_ft_probs": proportional,
+                "market_power_ft_probs": power,
+            }
+        )
+    for offset in range(8):
+        rows.append(
+            {
+                "fixture_id": 100 + offset,
+                "match_day": "2024-05-02",
+                "y_ft": 2,
+                "dixon_coles_ft_probs": proportional,
+                "market_ft_probs": proportional,
+                "market_power_ft_probs": power,
+            }
+        )
+    paired: list[dict] = []
+    description = _attach_blends(rows, {}, {}, paired, [], seed=7)
+    assert description["market_prefix"] == "blend_market"
+    labels = [item["label"] for item in paired]
+    assert len(labels) == len(set(labels)) == 9
+    assert labels.count("线性混合 − 走步所选去水位") == 1
+    assert labels.count("对数混合 − 走步所选去水位") == 1
+    assert labels.count("对数线性叠加 − 走步所选去水位") == 1

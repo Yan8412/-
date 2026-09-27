@@ -270,9 +270,9 @@ python -m laliga compare --history football-data --since 2012 --min-train 320 --
 
 第一条下载 `https://www.football-data.co.uk/mmz4281/{赛季}/SP1.csv`（例如 `1213` 到 `2627`），需要能访问该站的网络。站点会拒绝一部分没有普通浏览器 User-Agent 的请求。缓存命中时不再下载。`--refresh` 忽略缓存。
 
-导入的是赛果、半场比分，以及 Pinnacle 的赛前盘和收盘盘。PSH/PSD/PSA 是站点在周末前的周五下午、或中场周的周二下午采集的价格：不是开盘第一口，也不是收盘。公平比较用这一组，缺了才用同一时点的 Bet365（B365H/D/A）。PSCH/PSCD/PSCA 是收盘，预测时还没有，所以单独成行并标明「预测时不可用」，不进入混合。市场平均（Avg 或更早赛季的 BbAv）和最高价（Max 或 BbMx）会写入历史表，不单独作为模型行。
+导入的是赛果、半场比分，以及 Pinnacle 的赛前盘和收盘盘。PSH/PSD/PSA 是站点在周末前的周五下午、或中场周的周二下午采集的价格：不是开盘第一口，也不是收盘。公平比较用这一组，缺了才用同一时点的 Bet365（B365H/D/A）。PSCH/PSCD/PSCA 是收盘，预测时还没有，所以单独成行并标明「预测时不可用」，不进入混合。市场平均（Avg 或更早赛季的 BbAv）和最高价（Max 或 BbMx）会写入历史表，不单独作为模型行。CSV 的 `Time` 是英国时间（Europe/London）。赛季起始年取自文件名（`1213` 是 2012/13），不从开球月份推断，所以 2020 年 7 月打完的 2019/20 仍算 2019/20。
 
-2024/25 之后若 SportMonks 和 football-data 是同一天、同一对球队，比分、半场、fixture id 和球队 id 以 SportMonks 为准。全场比分不一致时记下来，并保留 SportMonks 的比分。队名对照在 `laliga/data/teams.py`。对不上的 SportMonks 队名保留原 id，不并进 football-data 的那一场。更早赛季没有 xG。
+2024/25 之后若 SportMonks 和 football-data 是同一天、同一对已对照的球队，比分、半场、fixture id 和球队 id 以 SportMonks 为准。全场比分不一致时记下来，并保留 SportMonks 的比分。队名对照在 `laliga/data/teams.py`，重音和「de」这一类词会先归一化。football-data 也覆盖的赛季里如果还有对不上的 SportMonks 队名，导入直接停止，不会把同一场写成两行。更早、football-data 没有的赛季仍保留原 id。更早赛季没有 xG。长历史对照会在终端和 JSON 里写出评测期每一行公平赛前盘的来源场次（Pinnacle PSH、Bet365、SportMonks，或没有）。Pinnacle 的 PSH 在 2025/26 中途会断，后面的行会落到 Bet365 或 SportMonks。
 
 第二条是原来的 SportMonks 对照，每天重拟合 Dixon–Coles，并训练 XGBoost。第三条读 `history.csv`。不写 `--output` 时，长历史写到 `predictions/model_comparison_history.json`，避免盖掉操作台读的那份 SportMonks 对照。长历史默认每 7 个 UTC 日重拟合一次 Dixon–Coles（`--refit-every 1` 可以改回每天），并且默认不训练 XGBoost（`--xgboost` 打开，`--no-xgboost` 在 SportMonks 对照里关掉）。`--since 2012` 从那个赛季的起始年留到评测里。评测期会跨多个赛季；终端在多于一个赛季时打印分赛季的对数损失和 RPS，并打印主胜概率 0.6–0.8 这一档的校准。`n_folds` 是计分的评测日，`n_refits` 是 Dixon–Coles 的拟合次数。
 

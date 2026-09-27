@@ -227,6 +227,7 @@ class ComparisonReport:
     n_refits: int = 0
     with_xgboost: bool = True
     by_season: dict | None = None
+    price_sources: dict | None = None
 
     def to_dict(self) -> dict:
         payload = {
@@ -255,6 +256,7 @@ class ComparisonReport:
             "xgboost": self.xgboost,
             "blend": self.blend,
             "by_season": _season_payload(self.by_season),
+            "price_sources": self.price_sources,
         }
         return _json_ready(payload)
 
@@ -464,6 +466,9 @@ def compare_models(
         )
     elif market_rows:
         notes.append("赛前赔率基准是各家开赛前 1X2 隐含概率的平均，再去掉水位。它不用模型，也不用本场 xG。")
+    price_sources = _price_sources(eval_rows) if history_source == "football-data" else None
+    if price_sources is not None:
+        notes.append(_format_price_sources(price_sources))
     blend = _attach_blends(eval_rows, models, calibration, paired, notes, seed=xgb_config.seed, history_source=history_source)
     season_blocks = _season_blocks(eval_rows, models, blend)
     return ComparisonReport(
@@ -509,6 +514,7 @@ def compare_models(
         n_refits=n_refits,
         with_xgboost=with_xgboost,
         by_season=season_blocks,
+        price_sources=price_sources,
     )
 
 
@@ -606,6 +612,10 @@ def _comparison_row(match, model: ScorelineModel, baseline, ft_probs, ht_probs, 
         "kickoff": kickoff.isoformat(),
         "match_day": kickoff.floor("D").date().isoformat(),
     }
+    if "fair_book" in match.index:
+        book = match["fair_book"]
+        if pd.notna(book) and str(book).strip():
+            row["fair_book"] = str(book).strip()
     if ft_probs is not None:
         row["xgboost_ft_probs"] = _prob_tuple(ft_probs)
         row["xgboost_ht_probs"] = None if ht_probs is None else _prob_tuple(ht_probs)
@@ -653,9 +663,11 @@ def _attach_blends(
         calibration[key] = calibration_summary(y_ft, np.array([row[f"{prefix}_ft_probs"] for row in scored], dtype=float))
     description["market_prefix"] = market_prefix
     if market_prefix == "blend_market":
+        seen_challengers: list[str] = []
         for challenger, _reference, _label in BLEND_PAIRS:
-            if not challenger.startswith("blend_"):
+            if not challenger.startswith("blend_") or challenger in seen_challengers:
                 continue
+            seen_challengers.append(challenger)
             paired.append(
                 _pair_stats(
                     scored,
@@ -820,6 +832,52 @@ def _comparison_notes(
     if history_source == "football-data":
         notes.append("这次读的是 processed/history.csv，不是每日更新用的 matches.csv。")
     return notes
+
+
+_PRICE_SOURCE_ORDER = ("pinnacle_pre", "bet365_pre", "sportmonks", "missing")
+_PRICE_SOURCE_LABELS = {
+    "pinnacle_pre": "Pinnacle 赛前盘（PSH）",
+    "bet365_pre": "Bet365 赛前盘",
+    "sportmonks": "SportMonks 已存价格",
+    "missing": "没有可用赛前盘",
+}
+
+
+def _price_sources(rows: list[dict]) -> dict:
+    """Count fair_book on the evaluation rows only, not the whole history file."""
+
+    counts = {key: 0 for key in _PRICE_SOURCE_ORDER}
+    by_season: dict[str, dict[str, int]] = {}
+    for row in rows:
+        book = str(row.get("fair_book") or "").strip()
+        if book not in counts:
+            book = "missing"
+        counts[book] += 1
+        season = str(row.get("season_name") or "") or "未知赛季"
+        bucket = by_season.setdefault(season, {key: 0 for key in _PRICE_SOURCE_ORDER})
+        bucket[book] += 1
+    payload = {
+        "test_rows": len(rows),
+        "counts": counts,
+        "labels": dict(_PRICE_SOURCE_LABELS),
+    }
+    if len(by_season) > 1:
+        payload["by_season"] = by_season
+    return payload
+
+
+def _format_price_sources(sources: dict) -> str:
+    labels = sources["labels"]
+    counts = sources["counts"]
+    parts = [f"{labels[key]} {counts[key]} 场" for key in _PRICE_SOURCE_ORDER]
+    lines = ["评测期每一场公平赛前盘的来源：" + "，".join(parts) + "。"]
+    by_season = sources.get("by_season") or {}
+    if len(by_season) > 1:
+        for season in sorted(by_season):
+            bucket = by_season[season]
+            detail = "，".join(f"{labels[key]} {bucket[key]} 场" for key in _PRICE_SOURCE_ORDER if bucket[key])
+            lines.append(f"{season}：{detail}。")
+    return "\n".join(lines)
 
 
 def model_label(key: str, history_source: str = "sportmonks", blend: dict | None = None) -> str:
