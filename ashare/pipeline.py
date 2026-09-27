@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from ashare.backtest.engine import BacktestResult, _collect_signals, run_backtest
+from ashare.dashboard_data import save_backtest_bundle
 from ashare.backtest.walkforward import run_walk_forward
 from ashare.broker.base import OrderRequest
 from ashare.broker.paper import PaperBroker
@@ -229,6 +230,7 @@ def run_research(
     )
     path = report_dir / f"backtest_{start.strftime('%Y%m%d')}_{end.strftime('%Y%m%d')}.md"
     path.write_text(body, encoding="utf-8")
+    save_backtest_bundle(report_dir / "backtest_latest.json", full + [combined], oos_pairs, notes)
     return path
 
 

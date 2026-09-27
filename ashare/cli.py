@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -44,6 +46,12 @@ def main(argv: list[str] | None = None) -> int:
     settle = paper_sub.add_parser("settle", help="用最新日线撮合待成交委托并更新盈亏")
     settle.add_argument("--ledger", type=Path, default=Path("data/paper/ledger.json"))
     settle.add_argument("--cache-dir", type=Path, default=Path("data/cache"))
+
+    dashboard = sub.add_parser("dashboard", help="打开本地中文看盘页面")
+    dashboard.add_argument("--port", type=int, default=8501)
+    dashboard.add_argument("--report-dir", type=Path, default=Path("reports"))
+    dashboard.add_argument("--cache-dir", type=Path, default=Path("data/cache"))
+    dashboard.add_argument("--ledger", type=Path, default=Path("data/paper/ledger.json"))
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -96,8 +104,35 @@ def main(argv: list[str] | None = None) -> int:
             print(line)
         return 0
 
+    if args.command == "dashboard":
+        return _launch_dashboard(args.port, args.report_dir, args.cache_dir, args.ledger)
+
     parser.error("未知命令")
     return 2
+
+
+def _launch_dashboard(port: int, report_dir: Path, cache_dir: Path, ledger: Path) -> int:
+    """Start the Streamlit page. Same command on Windows and Linux."""
+    app = Path(__file__).resolve().parent / "dashboard_app.py"
+    env = os.environ.copy()
+    env["ASHARE_REPORT_DIR"] = str(report_dir.resolve())
+    env["ASHARE_CACHE_DIR"] = str(cache_dir.resolve())
+    env["ASHARE_LEDGER"] = str(ledger.resolve())
+    command = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(app),
+        "--server.port",
+        str(port),
+        "--server.address",
+        "127.0.0.1",
+        "--browser.gatherUsageStats",
+        "false",
+    ]
+    print(f"看盘页面： http://127.0.0.1:{port}")
+    return subprocess.call(command, env=env)
 
 
 if __name__ == "__main__":
