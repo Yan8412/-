@@ -7,6 +7,7 @@ import json
 import logging
 import sys
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 
@@ -38,6 +39,7 @@ class CliError(Exception):
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_stdio()
     _load_env()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = build_parser()
@@ -188,30 +190,25 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     history = _require_history(store)
     config = _config(args, min_train=args.min_train)
     report = walk_forward(history, config)
+    output = Path(args.output) if args.output else None
+    if output is not None:
+        _write_utf8(output, json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
     print(format_backtest(report))
-    if args.output:
-        from pathlib import Path
-
-        output = Path(args.output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    if output is not None:
         print(f"\n回测 JSON 已写入 {output}")
     return 0
 
 
 def cmd_compare(args: argparse.Namespace) -> int:
-    from pathlib import Path
-
     from laliga.backtest import compare_models
 
     store = _store(args)
     history = _require_history(store)
     config = _config(args, min_train=args.min_train)
     report = compare_models(history, config)
-    print(format_comparison(report))
     output = Path(args.output) if args.output else store.predictions_dir / "model_comparison.json"
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_utf8(output, json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    print(format_comparison(report))
     print(f"\n对照 JSON 已写入 {output}")
     return 0
 
@@ -234,16 +231,14 @@ def cmd_predict(args: argparse.Namespace) -> int:
     history = store.load()
     config = _config(args, min_train=4)
     predictions = _predict(history, fixtures, config, store, refit=args.refit)
+    if args.csv:
+        write_predictions_csv(predictions, Path(args.csv))
+    if args.json:
+        write_predictions_json(predictions, Path(args.json))
     print(format_predictions(predictions))
     if args.csv:
-        from pathlib import Path
-
-        write_predictions_csv(predictions, Path(args.csv))
         print(f"\nCSV 已写入 {args.csv}")
     if args.json:
-        from pathlib import Path
-
-        write_predictions_json(predictions, Path(args.json))
         print(f"JSON 已写入 {args.json}")
     return 0
 
@@ -403,6 +398,38 @@ def _parse_date(value: str) -> date:
         return datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError as exc:
         raise argparse.ArgumentTypeError("日期格式应为 YYYY-MM-DD") from exc
+
+
+def _configure_stdio() -> None:
+    """Point CLI stdout and stderr at UTF-8 before any log line or table is printed.
+
+    A Windows console already accepts Unicode. A pipe or redirected file uses
+    the ANSI code page (GBK on a Chinese locale) and raises UnicodeEncodeError
+    for characters the comparison table prints: the minus sign in paired
+    labels, the en dash in Dixon–Coles, the em dash for a missing metric, and
+    the box-drawing rule. That used to abort ``compare`` before the JSON
+    existed. UTF-8 keeps those characters. If the stream refuses an encoding
+    change, replacing unencodable characters is still better than crashing.
+    """
+
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError, AttributeError):
+            try:
+                reconfigure(errors="replace")
+            except (OSError, ValueError, AttributeError):
+                pass
+
+
+def _write_utf8(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
 
 
 def _load_env() -> None:

@@ -315,6 +315,7 @@ def test_compare_command_writes_the_file_offline(tmp_path: Path):
         cwd=REPO,
         env=env,
         text=True,
+        encoding="utf-8",
         capture_output=True,
         check=False,
     )
