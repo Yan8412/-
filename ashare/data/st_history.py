@@ -211,11 +211,11 @@ def _query(bs, code: str, start: date, end: date) -> list[dict] | None:
         logger.warning("Baostock 查询 %s 异常：%s", code, exc)
         return None
     if getattr(cursor, "error_code", "1") != "0":
-        logger.warning(
-            "Baostock 查询 %s 失败：%s",
-            code,
-            getattr(cursor, "error_msg", cursor),
-        )
+        message = str(getattr(cursor, "error_msg", cursor))
+        logger.warning("Baostock 查询 %s 失败：%s", code, message)
+        # A rejected code is not a dead session. Re-login would drop the rest of the batch.
+        if "未标识" in message:
+            return []
         return None
     fields = list(getattr(cursor, "fields", None) or [])
     rows: list[dict] = []
@@ -273,4 +273,6 @@ def _write_meta(path: Path, last: str | None) -> None:
         "fetched_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "last_date": last,
     }
-    _meta_path(path).write_text(json.dumps(payload), encoding="utf-8")
+    meta = _meta_path(path)
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    meta.write_text(json.dumps(payload), encoding="utf-8")

@@ -102,6 +102,56 @@ def test_st_sync_caches_and_skips_a_fresh_file(tmp_path, monkeypatch):
     assert len(calls) == 1
 
 
+def test_rejected_code_does_not_drop_the_rest_of_the_batch(tmp_path, monkeypatch):
+    logins = {"n": 0}
+
+    class _Login:
+        error_code = "0"
+        error_msg = "success"
+
+    class _Cursor:
+        def __init__(self, code: str) -> None:
+            self.error_code = "0" if code != "bj.920000" else "10001001"
+            self.error_msg = "success" if code != "bj.920000" else "股票代码未标识sh或sz"
+            self.fields = ["date", "code", "isST", "tradestatus"]
+            self._rows = [["2026-09-24", code, "0", "1"]]
+            self._index = 0
+
+        def next(self) -> bool:
+            if self.error_code != "0" or self._index >= len(self._rows):
+                return False
+            self._current = self._rows[self._index]
+            self._index += 1
+            return True
+
+        def get_row_data(self) -> list[str]:
+            return self._current
+
+    class _Baostock:
+        def login(self):
+            logins["n"] += 1
+            return _Login()
+
+        def logout(self):
+            return _Login()
+
+        def query_history_k_data_plus(self, code, fields, start_date, end_date, frequency, adjustflag):
+            del fields, start_date, end_date, frequency, adjustflag
+            return _Cursor(code)
+
+    monkeypatch.setitem(sys.modules, "baostock", _Baostock())
+    now = datetime(2026, 9, 24, 16, 0, tzinfo=SHANGHAI)
+    summary = sync_st_history(tmp_path, ["920000", "600000"], date(2026, 9, 24), now=now)
+    assert logins["n"] == 1
+    assert summary["updated"] == 2
+    assert summary["failed"] == 0
+    assert load_status(tmp_path, "600000")[date(2026, 9, 24)] == (False, True)
+    assert load_status(tmp_path, "920000") == {}
+    again = sync_st_history(tmp_path, ["920000", "600000"], date(2026, 9, 24), now=now)
+    assert again["fresh"] == 2
+    assert logins["n"] == 1
+
+
 def test_derive_seal_counts_breaks_and_a_reclose():
     bars = [
         {"time": "09:31", "high": 10.2, "low": 10.0, "close": 10.1},

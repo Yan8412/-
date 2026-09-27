@@ -209,7 +209,7 @@ python -m ashare train
 
 默认回测用全市场目录，不再只拿当天成交额最高的 50 只。退市股票能不能进来，取决于免费源有没有代码和日线，报告里会写清下载了多少、缺了多少。
 
-ST 和停牌按 Baostock `query_history_k_data_plus` 的 `isST`、`tradestatus` 逐日判断，缓存在 `data/cache/st/{代码}.parquet`（没有 pyarrow 时是同名 JSON）。已经覆盖到最近一个交易日的文件不再请求；缺的只补尾部。某一天是 ST 才从那天的股票池拿掉，不再因为今天的名称里有 ST 就把整段历史丢掉。`tradestatus=0` 的日子不能买卖。Baostock 登录失败或单只查询失败时记警告，已有缓存照常使用；完全没有文件的股票不会按今天的名称整段排除。五策略 `backtest` 和 `daily` / `research` 走的是同一套逐日标记。
+ST 和停牌按 Baostock `query_history_k_data_plus` 的 `isST`、`tradestatus` 逐日判断，缓存在 `data/cache/st/{代码}.parquet`（没有 pyarrow 时是同名 JSON）。已经覆盖到最近一个交易日的文件不再请求；缺的只补尾部。某一天是 ST 才从那天的股票池拿掉，不再因为今天的名称里有 ST 就把整段历史丢掉。`tradestatus=0` 的日子不能买卖。Baostock 登录失败或单只查询失败时记警告，已有缓存照常使用；完全没有文件的股票不会按今天的名称整段排除。北交所 920 段代码在 Baostock 上会返回「未标识 sh 或 sz」，这类代码记一笔空缓存，当天仍按 30% 涨跌停，不把整批查询停掉。五策略 `backtest` 和 `daily` / `research` 走的是同一套逐日标记。
 
 ## 行情过滤和排序
 
