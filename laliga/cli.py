@@ -102,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     compare = sub.add_parser(
         "compare",
-        help="在同一次走步回测里比较 Dixon–Coles、历史频率基准和 XGBoost（不进入每日更新）",
+        help="在同一次走步回测里比较 Dixon–Coles、历史频率基准和 XGBoost；有赔率时再混合两者（不进入每日更新）",
     )
     _add_model_args(compare)
     compare.add_argument(

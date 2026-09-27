@@ -20,7 +20,7 @@ import pandas as pd
 from flask import Flask, abort, redirect, render_template, request, send_file, url_for
 from werkzeug.serving import make_server
 
-from laliga.backtest import walk_forward
+from laliga.backtest import COMPARISON_TABLE_KEYS, MODEL_LABELS, walk_forward
 from laliga.config import DEFAULT_SEASONS, ModelConfig, api_token
 from laliga.data.client import SportMonksError, open_client
 from laliga.data.fetch import fetch_historical, fetch_window
@@ -561,13 +561,7 @@ def _load_comparison(path: Path) -> dict | None:
 
 
 def _comparison_view(payload: dict) -> dict:
-    labels = (
-        ("dixon_coles", "Dixon–Coles"),
-        ("baseline", "历史频率基准"),
-        ("market", "赛前赔率（去水位）"),
-        ("xgboost", "XGBoost（无赔率）"),
-        ("xgboost_with_odds", "XGBoost（含赔率）"),
-    )
+    labels = tuple((key, MODEL_LABELS[key]) for key in COMPARISON_TABLE_KEYS)
     outcome_labels = {"home": "主胜", "draw": "平", "away": "客胜"}
 
     def num(value, digits: int, percent: bool = False) -> str:

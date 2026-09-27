@@ -16,6 +16,7 @@ import pandas as pd
 
 from laliga.config import ModelConfig
 from laliga.model.baseline import fit_baseline
+from laliga.model.blend import blend_notes, walk_forward_blends
 from laliga.model.dixon_coles import FitError
 from laliga.model.features import (
     ODDS_FEATURES,
@@ -144,7 +145,34 @@ MODEL_LABELS = {
     "xgboost": "XGBoost（无赔率）",
     "xgboost_with_odds": "XGBoost（含赔率）",
     "market": "赛前赔率（去水位）",
+    "dixon_coles_on_blend": "Dixon–Coles（混合同一批）",
+    "market_on_blend": "赛前赔率（去水位，混合同一批）",
+    "blend_linear": "线性混合",
+    "blend_log": "对数混合",
+    "blend_stack": "对数线性叠加",
 }
+
+COMPARISON_TABLE_KEYS = (
+    "dixon_coles",
+    "baseline",
+    "market",
+    "xgboost",
+    "xgboost_with_odds",
+    "dixon_coles_on_blend",
+    "market_on_blend",
+    "blend_linear",
+    "blend_log",
+    "blend_stack",
+)
+
+BLEND_PAIRS = (
+    ("blend_linear", "market", "线性混合 − 赛前赔率（去水位）"),
+    ("blend_linear", "dixon_coles", "线性混合 − Dixon–Coles（混合同一批）"),
+    ("blend_log", "market", "对数混合 − 赛前赔率（去水位）"),
+    ("blend_log", "dixon_coles", "对数混合 − Dixon–Coles（混合同一批）"),
+    ("blend_stack", "market", "对数线性叠加 − 赛前赔率（去水位）"),
+    ("blend_stack", "dixon_coles", "对数线性叠加 − Dixon–Coles（混合同一批）"),
+)
 
 
 @dataclass
@@ -167,6 +195,7 @@ class ComparisonReport:
     calibration: dict[str, dict]
     paired: list[dict]
     xgboost: dict
+    blend: dict | None = None
 
     def to_dict(self) -> dict:
         payload = {
@@ -189,6 +218,7 @@ class ComparisonReport:
             "calibration": self.calibration,
             "paired": self.paired,
             "xgboost": self.xgboost,
+            "blend": self.blend,
         }
         return _json_ready(payload)
 
@@ -347,6 +377,7 @@ def compare_models(matches: pd.DataFrame, config: ModelConfig, xgb_config=None) 
         )
     elif market_rows:
         notes.append("赛前赔率基准是各家开赛前 1X2 隐含概率的平均，再去掉水位。它不用模型，也不用本场 xG。")
+    blend = _attach_blends(eval_rows, models, calibration, paired, notes, seed=xgb_config.seed)
     return ComparisonReport(
         n_folds=folds,
         first_test_day=None if first_day is None else pd.Timestamp(first_day).date().isoformat(),
@@ -383,6 +414,7 @@ def compare_models(matches: pd.DataFrame, config: ModelConfig, xgb_config=None) 
             "ht_folds_with_early_stopping": int(sum(ht_stopping)),
             "odds_folds_with_early_stopping": int(sum(odds_stopping)),
         },
+        blend=blend,
     )
 
 
@@ -459,6 +491,11 @@ def _comparison_row(match, model: ScorelineModel, baseline, ft_probs, ht_probs, 
     if pd.notna(match["home_goals_ht"]) and pd.notna(match["away_goals_ht"]):
         y_ht = outcome_index(int(match["home_goals_ht"]), int(match["away_goals_ht"]))
     season_id = match["season_id"]
+    kickoff = pd.Timestamp(match["starting_at"])
+    if kickoff.tzinfo is None:
+        kickoff = kickoff.tz_localize("UTC")
+    else:
+        kickoff = kickoff.tz_convert("UTC")
     row = {
         "fixture_id": int(match["fixture_id"]),
         "season_id": None if pd.isna(season_id) else int(season_id),
@@ -474,6 +511,8 @@ def _comparison_row(match, model: ScorelineModel, baseline, ft_probs, ht_probs, 
         "baseline_top3": [(home, away) for home, away, _ in baseline.top_scores],
         "xgboost_ft_probs": _prob_tuple(ft_probs),
         "xgboost_ht_probs": None if ht_probs is None else _prob_tuple(ht_probs),
+        "kickoff": kickoff.isoformat(),
+        "match_day": kickoff.floor("D").date().isoformat(),
     }
     if odds_ft is not None:
         row["xgboost_with_odds_ft_probs"] = _prob_tuple(odds_ft)
@@ -486,6 +525,36 @@ def _comparison_row(match, model: ScorelineModel, baseline, ft_probs, ht_probs, 
             implied["odds_implied_away"],
         )
     return row
+
+
+def _attach_blends(rows: list[dict], models: dict, calibration: dict, paired: list[dict], notes: list[str], *, seed: int) -> dict:
+    """Score walk-forward blends on the rows that have both Dixon–Coles and a price.
+
+    Metric blocks for Dixon–Coles and the market are repeated on that same
+    scored subset so their n matches the blend. The full-sample rows are left
+    as they are.
+    """
+
+    description = walk_forward_blends(rows)
+    notes.extend(blend_notes(description))
+    if not description["available"]:
+        return description
+    scored = [row for row in rows if row.get("blend_linear_ft_probs") is not None]
+    if len(scored) != description["scored_n"]:
+        raise FitError("混合计分场次和写入的概率行数不一致。")
+    y_ft = np.array([row["y_ft"] for row in scored], dtype=int)
+    for key, prefix in (
+        ("dixon_coles_on_blend", "dixon_coles"),
+        ("market_on_blend", "market"),
+        ("blend_linear", "blend_linear"),
+        ("blend_log", "blend_log"),
+        ("blend_stack", "blend_stack"),
+    ):
+        models[key] = summarize_rows(scored, prefix)
+        calibration[key] = calibration_summary(y_ft, np.array([row[f"{prefix}_ft_probs"] for row in scored], dtype=float))
+    for challenger, reference, label in BLEND_PAIRS:
+        paired.append(_pair_stats(scored, y_ft, challenger, reference, label, seed))
+    return description
 
 
 def _fit_optional_market(train_frame, test_frame, names, target, xgb_config, fit_outcome_model):

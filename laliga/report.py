@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from laliga.backtest import MODEL_LABELS, BacktestReport, ComparisonReport
+from laliga.backtest import COMPARISON_TABLE_KEYS, MODEL_LABELS, BacktestReport, ComparisonReport
 from laliga.model.metrics import MetricBlock
 from laliga.model.service import Prediction
 
@@ -160,7 +160,7 @@ def format_team_table(model_document_ft: dict, title: str) -> str:
 def _comparison_table(report: ComparisonReport) -> str:
     header = ["模型", "全场对数损失", "全场 Brier", "全场命中率", "半场对数损失", "半场 Brier", "半场命中率", "n"]
     rows = [header]
-    for key in ("dixon_coles", "baseline", "market", "xgboost", "xgboost_with_odds"):
+    for key in COMPARISON_TABLE_KEYS:
         block = report.models.get(key)
         if block is None:
             continue
@@ -182,7 +182,7 @@ def _comparison_table(report: ComparisonReport) -> str:
 def _calibration_table(report: ComparisonReport) -> str:
     rows = [["模型", "结果", "平均预测概率", "实际频率", "n"]]
     labels = {"home": "主胜", "draw": "平", "away": "客胜"}
-    for key in ("dixon_coles", "baseline", "market", "xgboost", "xgboost_with_odds"):
+    for key in COMPARISON_TABLE_KEYS:
         summary = report.calibration.get(key)
         if not summary:
             continue

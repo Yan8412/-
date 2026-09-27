@@ -1,1 +1,1 @@
-"""Dixon–Coles goals model, frequency baseline, metrics, and the XGBoost challenger."""
+"""Dixon–Coles goals model, frequency baseline, metrics, the XGBoost challenger, and market blends."""

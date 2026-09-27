@@ -35,7 +35,7 @@
 {% if comparison %}
 <section class="panel" id="model-comparison">
   <h2>XGBoost 对照</h2>
-  <p class="muted">同一走步、同一批比赛：Dixon–Coles、历史频率基准、XGBoost。评测 {{ comparison.n }} 场，{{ comparison.first }} 至 {{ comparison.last }}，{{ comparison.folds }} 个评测日。预测用的模型仍是 Dixon–Coles。这些数字来自本机 <code>python -m laliga compare</code> 写出的文件。</p>
+  <p class="muted">同一走步、同一批比赛：Dixon–Coles、历史频率基准、XGBoost。评测 {{ comparison.n }} 场，{{ comparison.first }} 至 {{ comparison.last }}，{{ comparison.folds }} 个评测日。预测用的模型仍是 Dixon–Coles。有赛前赔率且热身场次够了时，同一份文件里还有 Dixon–Coles 与去水位赔率的混合，场次是热身之后的那一批。这些数字来自本机 <code>python -m laliga compare</code> 写出的文件。</p>
   {% if comparison.odds_coverage %}
   <p class="muted">评测比赛里带完整赛前赔率的比例：{{ comparison.odds_coverage }}。</p>
   {% endif %}

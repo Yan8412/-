@@ -241,6 +241,9 @@ def test_compare_uses_the_same_matches_as_dixon_coles_backtest():
     paired = next(item for item in report.paired if item["challenger"] == "xgboost" and item["reference"] == "dixon_coles")
     assert paired["ci_low"] <= paired["mean_logloss_difference"] <= paired["ci_high"]
     assert paired["n"] == baseline.model.n
+    assert report.blend["available"] is False
+    assert "blend_linear" not in report.models
+    assert "60" in report.blend["reason"]
     payload = report.to_dict()
     assert payload["computed_from_stored_matches"] is True
     assert payload["production_model"] == "dixon_coles"
@@ -266,6 +269,8 @@ def test_odds_that_start_after_the_first_window_do_not_change_the_match_set():
     assert "market" in report.models
     assert 1 <= report.models["market"].n <= 8
     assert report.models["market"].n <= report.models["dixon_coles"].n
+    assert report.blend["available"] is False
+    assert "blend_linear" not in report.models
     if report.models["market"].n < report.models["dixon_coles"].n:
         assert any("赛前赔率基准只统计" in note for note in report.notes)
 
@@ -391,6 +396,46 @@ def test_dashboard_shows_only_a_computed_comparison_file(tmp_path: Path):
     assert "1.2345" in page
     assert "XGBoost（无赔率）" in page
     assert "-0.1845" in page
+    assert "线性混合" not in page
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["models"]["blend_linear"] = {
+        "n": 8,
+        "ft_log_loss": 0.91,
+        "ft_brier": 0.55,
+        "ft_accuracy": 0.5,
+        "ht_log_loss": None,
+    }
+    payload["models"]["market_on_blend"] = {
+        "n": 8,
+        "ft_log_loss": 0.93,
+        "ft_brier": 0.57,
+        "ft_accuracy": 0.45,
+        "ht_log_loss": None,
+    }
+    payload["models"]["dixon_coles_on_blend"] = {
+        "n": 8,
+        "ft_log_loss": 0.97,
+        "ft_brier": 0.58,
+        "ft_accuracy": 0.4,
+        "ht_log_loss": None,
+    }
+    payload["paired"].append(
+        {
+            "label": "线性混合 − 赛前赔率（去水位）",
+            "mean_logloss_difference": -0.02,
+            "ci_low": -0.04,
+            "ci_high": 0.01,
+            "n": 8,
+        }
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    blended = client.get("/backtest").get_data(as_text=True)
+    assert "线性混合" in blended
+    assert "赛前赔率（去水位，混合同一批）" in blended
+    assert "Dixon–Coles（混合同一批）" in blended
+    assert "线性混合 − 赛前赔率（去水位）" in blended
+    assert "-0.0200" in blended
 
     demo = create_app(tmp_path, demo=True)
     demo_page = demo.test_client().get("/backtest").get_data(as_text=True)
