@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}西甲预测操作台{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body data-demo="{{ 1 if demo else 0 }}">
+  {% if demo %}
+  <p class="demo-banner" role="status">合成示例数据，不是真实西甲。球队、比分和概率都来自程序生成的示例赛程，不能当作西甲预测。要看真实缓存，请不带 --demo 重新运行 python -m laliga web。</p>
+  {% endif %}
+  <header>
+    <div class="top">
+      <div>
+        <h1>西甲预测操作台</h1>
+        <p>全场胜平负、半场胜平负、最可能的三个比分</p>
+      </div>
+      <p>{% if token_set %}已检测到 API token（页面不显示内容）{% else %}未设置 SPORTMONKS_API_TOKEN{% endif %}</p>
+    </div>
+    <nav aria-label="站内">
+      <a href="{{ url_for('home') }}">操作台</a>
+      <a href="{{ url_for('predictions') }}">预测结果</a>
+      <a href="{{ url_for('backtest_page') }}">回测结果</a>
+      <a href="{{ url_for('data_page') }}">数据状态</a>
+    </nav>
+  </header>
+  <main>
+    {% block body %}{% endblock %}
+  </main>
+  <footer>
+    <nav aria-label="外部文档">
+      <a href="https://docs.sportmonks.com/v3">SportMonks 文档</a>
+      <a href="https://docs.sportmonks.com/v3/tutorials-and-guides/tutorials/includes/scores">比分字段说明</a>
+      <a href="https://github.com/Yan8412/-">项目仓库</a>
+    </nav>
+    <p>概率是模型估计，不是投注建议。开球时间同时给出 UTC 和新加坡时间（UTC+8）。</p>
+  </footer>
+</body>
+</html>

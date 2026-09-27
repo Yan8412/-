@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}比赛 {{ fixture_id }}{% endblock %}
+{% block body %}
+<section class="panel">
+  <p><a href="{{ url_for('predictions') }}">返回预测结果</a></p>
+  {% if item %}
+  <h2>{{ item.home_team }} 对 {{ item.away_team }}</h2>
+  <p>开球 UTC {{ utc }} · 新加坡 {{ singapore }}</p>
+  <p>全场 {{ '%.1f'|format(item.ft.home * 100) }}% / {{ '%.1f'|format(item.ft.draw * 100) }}% / {{ '%.1f'|format(item.ft.away * 100) }}%
+    · 半场 {{ '%.1f'|format(item.ht.home * 100) }}% / {{ '%.1f'|format(item.ht.draw * 100) }}% / {{ '%.1f'|format(item.ht.away * 100) }}%</p>
+  <p class="muted">期望进球 全场 {{ '%.2f'|format(item.expected_goals_ft.home) }}-{{ '%.2f'|format(item.expected_goals_ft.away) }}，半场 {{ '%.2f'|format(item.expected_goals_ht.home) }}-{{ '%.2f'|format(item.expected_goals_ht.away) }}。绿色格子是全场概率最高的三个比分。</p>
+  {% elif match is not none %}
+  <h2>{{ match.home_team_name }} 对 {{ match.away_team_name }}</h2>
+  <p class="empty">这场比赛不在最近一次预测里，所以没有赛前概率表。最近一次预测里的比赛才会带完整比分分布。</p>
+  {% endif %}
+  {% if actual %}
+  <p>本地记录的全场比分：{{ actual }}。若这场比赛已经用于训练，上面的分布不能当作赛前预测。</p>
+  {% endif %}
+</section>
+{% if grids and grids.ft %}
+<section class="panel" style="margin-top: 14px">
+  <h2>全场比分概率</h2>
+  <div class="wrap">
+    <table class="grid" id="ft-grid">
+      <thead>
+        <tr>
+          <th>主\客</th>
+          {% for away in grids.ft.away_headers %}<th>{{ away }}</th>{% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in grids.ft.rows %}
+        <tr>
+          <th>{{ row.home }}</th>
+          {% for cell in row.cells %}
+          <td class="{{ 'top' if cell.top else '' }}" data-prob="{{ '%.6f'|format(cell.probability) }}">{{ '%.1f'|format(cell.probability * 100) }}%</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+<section class="panel" style="margin-top: 14px">
+  <h2>半场比分概率</h2>
+  <div class="wrap">
+    <table class="grid" id="ht-grid">
+      <thead>
+        <tr>
+          <th>主\客</th>
+          {% for away in grids.ht.away_headers %}<th>{{ away }}</th>{% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in grids.ht.rows %}
+        <tr>
+          <th>{{ row.home }}</th>
+          {% for cell in row.cells %}
+          <td data-prob="{{ '%.6f'|format(cell.probability) }}">{{ '%.1f'|format(cell.probability * 100) }}%</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+{% endblock %}
