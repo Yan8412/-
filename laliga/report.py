@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from laliga.backtest import BacktestReport
+from laliga.backtest import MODEL_LABELS, BacktestReport, ComparisonReport
 from laliga.model.metrics import MetricBlock
 from laliga.model.service import Prediction
 
@@ -115,6 +115,32 @@ def format_backtest(report: BacktestReport) -> str:
     return "\n".join(lines)
 
 
+def format_comparison(report: ComparisonReport) -> str:
+    scored = report.models["dixon_coles"]
+    lines = [
+        "XGBoost 对照：与 Dixon–Coles、历史频率基准同一走步、同一批比赛。",
+        f"评测比赛 {scored.n} 场（有半场比分的 {scored.n_ht} 场），"
+        f"{report.first_test_day} 至 {report.last_test_day}，{report.n_folds} 个评测日。",
+        f"每个评测日前至少 {report.min_train_matches} 场完场比赛。训练只用该日 00:00 UTC 之前的数据。",
+        "生产预测仍是 Dixon–Coles。这个对照不在每日更新里。",
+        "",
+        _comparison_table(report),
+    ]
+    if report.odds_coverage is not None:
+        lines.append(f"评测比赛中带完整赛前赔率的比例：{report.odds_coverage * 100:.1f}%。")
+    lines.append("")
+    lines.append("校准：每一类的平均预测概率，以及实际出现的频率。")
+    lines.append(_calibration_table(report))
+    lines.append("")
+    lines.append("配对比较：每场全场对数损失之差的均值。负值表示减号前面的模型更好。")
+    lines.append("区间是 1000 次 bootstrap 的 2.5% 和 97.5% 分位。")
+    lines.append(_paired_table(report))
+    lines.append("")
+    for note in report.notes:
+        lines.append(note)
+    return "\n".join(lines)
+
+
 def format_team_table(model_document_ft: dict, title: str) -> str:
     teams = []
     for team_id, body in (model_document_ft.get("teams") or {}).items():
@@ -129,6 +155,63 @@ def format_team_table(model_document_ft: dict, title: str) -> str:
         f"样本={model_document_ft['n_matches']}"
     )
     return header + "\n" + _table(rows)
+
+
+def _comparison_table(report: ComparisonReport) -> str:
+    header = ["模型", "全场对数损失", "全场 Brier", "全场命中率", "半场对数损失", "半场 Brier", "半场命中率", "n"]
+    rows = [header]
+    for key in ("dixon_coles", "baseline", "xgboost", "xgboost_with_odds"):
+        block = report.models.get(key)
+        if block is None:
+            continue
+        rows.append(
+            [
+                MODEL_LABELS.get(key, key),
+                _format_metric(block.ft_log_loss, False, 4),
+                _format_metric(block.ft_brier, False, 4),
+                _format_metric(block.ft_accuracy, True, 1),
+                _format_metric(block.ht_log_loss, False, 4),
+                _format_metric(block.ht_brier, False, 4),
+                _format_metric(block.ht_accuracy, True, 1),
+                str(block.n),
+            ]
+        )
+    return _table(rows)
+
+
+def _calibration_table(report: ComparisonReport) -> str:
+    rows = [["模型", "结果", "平均预测概率", "实际频率", "n"]]
+    labels = {"home": "主胜", "draw": "平", "away": "客胜"}
+    for key in ("dixon_coles", "baseline", "xgboost", "xgboost_with_odds"):
+        summary = report.calibration.get(key)
+        if not summary:
+            continue
+        for item in summary.get("per_class") or []:
+            rows.append(
+                [
+                    MODEL_LABELS.get(key, key),
+                    labels.get(item["outcome"], item["outcome"]),
+                    f"{item['mean_predicted']:.4f}",
+                    f"{item['observed_frequency']:.4f}",
+                    str(item["n"]),
+                ]
+            )
+    return _table(rows)
+
+
+def _paired_table(report: ComparisonReport) -> str:
+    rows = [["比较", "对数损失之差", "95% 区间低", "95% 区间高", "n"]]
+    for item in report.paired:
+        rows.append(
+            [
+                item["label"],
+                f"{item['mean_logloss_difference']:.4f}",
+                f"{item['ci_low']:.4f}",
+                f"{item['ci_high']:.4f}",
+                str(item["n"]),
+            ]
+        )
+    return _table(rows)
 
 
 def _metric_table(title: str, model: MetricBlock, baseline: MetricBlock | None) -> str:

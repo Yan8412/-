@@ -19,6 +19,7 @@ from laliga.model.dixon_coles import FitError
 from laliga.model.service import ScorelineModel, fit_models, model_is_fresh
 from laliga.report import (
     format_backtest,
+    format_comparison,
     format_predictions,
     format_team_table,
     write_predictions_csv,
@@ -87,6 +88,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backtest.add_argument("--output", type=str, default="", help="把回测 JSON 写到这个路径")
     backtest.set_defaults(func=cmd_backtest)
+
+    compare = sub.add_parser(
+        "compare",
+        help="在同一次走步回测里比较 Dixon–Coles、历史频率基准和 XGBoost（不进入每日更新）",
+    )
+    _add_model_args(compare)
+    compare.add_argument(
+        "--min-train",
+        type=int,
+        default=DEFAULT_MIN_TRAIN_MATCHES,
+        help=f"每个评测日之前至少要有多少场完场比赛（默认 {DEFAULT_MIN_TRAIN_MATCHES}）",
+    )
+    compare.add_argument(
+        "--output",
+        type=str,
+        default="",
+        help="对照 JSON 的路径。默认写到数据目录的 predictions/model_comparison.json",
+    )
+    compare.set_defaults(func=cmd_compare)
 
     predict = sub.add_parser("predict", help="预测未开赛比赛")
     _add_model_args(predict)
@@ -176,6 +196,23 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n回测 JSON 已写入 {output}")
+    return 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from laliga.backtest import compare_models
+
+    store = _store(args)
+    history = _require_history(store)
+    config = _config(args, min_train=args.min_train)
+    report = compare_models(history, config)
+    print(format_comparison(report))
+    output = Path(args.output) if args.output else store.predictions_dir / "model_comparison.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"\n对照 JSON 已写入 {output}")
     return 0
 
 

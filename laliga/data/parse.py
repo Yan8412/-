@@ -15,6 +15,7 @@ is absent.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 import pandas as pd
@@ -53,6 +54,34 @@ MATCH_COLUMNS = [
     "status",
 ]
 
+# Optional pre-match / historical columns. Absent on older caches; preserved when present.
+# home_xg/away_xg are post-match expected goals for that fixture (type 5304). Models may
+# use them only as history for later matches. Odds are pre-match decimal 1X2 prices.
+OPTIONAL_FLOAT_COLUMNS = [
+    "home_xg",
+    "away_xg",
+    "odds_home",
+    "odds_draw",
+    "odds_away",
+]
+
+_XG_TYPE_ID = 5304
+_FULLTIME_MARKET_ID = 1
+_FULLTIME_MARKET_NAMES = {
+    "fulltime result",
+    "full time result",
+    "match winner",
+    "1x2",
+}
+_OUTCOME_SIDES = {
+    "home": "home",
+    "1": "home",
+    "draw": "draw",
+    "x": "draw",
+    "away": "away",
+    "2": "away",
+}
+
 
 def empty_matches() -> pd.DataFrame:
     frame = pd.DataFrame(columns=MATCH_COLUMNS)
@@ -87,7 +116,11 @@ def fixtures_to_frame(fixtures: list[dict[str, Any]]) -> pd.DataFrame:
     frame = frame.dropna(subset=["fixture_id", "starting_at", "home_team_id", "away_team_id"])
     frame = frame[frame["home_team_id"] != frame["away_team_id"]]
     frame = frame.sort_values(["starting_at", "fixture_id"]).reset_index(drop=True)
-    return frame[MATCH_COLUMNS]
+    for column in OPTIONAL_FLOAT_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = pd.NA
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    return frame[MATCH_COLUMNS + OPTIONAL_FLOAT_COLUMNS]
 
 
 def parse_fixture(fixture: dict[str, Any]) -> dict[str, Any] | None:
@@ -118,6 +151,8 @@ def parse_fixture(fixture: dict[str, Any]) -> dict[str, Any] | None:
     season = fixture.get("season") or {}
     round_obj = fixture.get("round") or {}
     status = _status(state_name, state_id, ft)
+    home_xg, away_xg = _team_xg(fixture, home_id, away_id)
+    odds_home, odds_draw, odds_away = _prematch_decimal_odds(fixture)
     return {
         "fixture_id": fixture.get("id"),
         "league_id": fixture.get("league_id"),
@@ -137,6 +172,11 @@ def parse_fixture(fixture: dict[str, Any]) -> dict[str, Any] | None:
         "home_goals_ft": None if ft is None else ft[0],
         "away_goals_ft": None if ft is None else ft[1],
         "status": status,
+        "home_xg": home_xg,
+        "away_xg": away_xg,
+        "odds_home": odds_home,
+        "odds_draw": odds_draw,
+        "odds_away": odds_away,
     }
 
 
@@ -227,3 +267,120 @@ def _status(state_name: str | None, state_id: Any, ft: tuple[int, int] | None) -
     if ft is not None:
         return "finished"
     return "skipped"
+
+
+def _team_xg(fixture: dict[str, Any], home_id: int, away_id: int) -> tuple[float | None, float | None]:
+    """Full-time expected goals (type 5304) for the two sides. Other xG types are ignored."""
+
+    chunk = fixture.get("xgfixture")
+    if chunk is None:
+        chunk = fixture.get("xGFixture")
+    if not isinstance(chunk, list):
+        return None, None
+    home: float | None = None
+    away: float | None = None
+    for row in chunk:
+        if not isinstance(row, dict) or not _is_expected_goals(row):
+            continue
+        value = _xg_value(row)
+        if value is None:
+            continue
+        location = str(row.get("location") or "").lower()
+        participant = _as_int(row.get("participant_id"))
+        if location == "home" or participant == home_id:
+            home = value
+        elif location == "away" or participant == away_id:
+            away = value
+    return home, away
+
+
+def _is_expected_goals(row: dict[str, Any]) -> bool:
+    if _as_int(row.get("type_id")) == _XG_TYPE_ID:
+        return True
+    type_obj = row.get("type") if isinstance(row.get("type"), dict) else {}
+    code = str(type_obj.get("code") or row.get("code") or "").lower()
+    developer = str(type_obj.get("developer_name") or "").upper()
+    return code == "expected-goals" or developer == "EXPECTED_GOALS"
+
+
+def _xg_value(row: dict[str, Any]) -> float | None:
+    data = row.get("data") if isinstance(row.get("data"), dict) else {}
+    raw = data.get("value", row.get("value"))
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+
+
+def _prematch_decimal_odds(fixture: dict[str, Any]) -> tuple[float | None, float | None, float | None]:
+    """One bookmaker's pre-match 1X2 decimals. In-play prices are never read."""
+
+    rows: list[dict[str, Any]] = []
+    for key in ("odds", "premiumOdds", "premiumodds"):
+        chunk = fixture.get(key)
+        if isinstance(chunk, list):
+            rows.extend(item for item in chunk if isinstance(item, dict))
+    by_book: dict[int, dict[str, float]] = {}
+    for row in rows:
+        if not _is_fulltime_result_market(row):
+            continue
+        side = _outcome_side(row.get("label")) or _outcome_side(row.get("name")) or _outcome_side(row.get("original_label"))
+        price = _decimal_price(row.get("value"))
+        if side is None or price is None:
+            continue
+        book_id = _as_int(row.get("bookmaker_id"))
+        if book_id is None:
+            book_id = 10**9
+        by_book.setdefault(book_id, {})[side] = price
+    complete = {book: prices for book, prices in by_book.items() if {"home", "draw", "away"} <= set(prices)}
+    if not complete:
+        return None, None, None
+    chosen = complete[min(complete)]
+    return chosen["home"], chosen["draw"], chosen["away"]
+
+
+def _is_fulltime_result_market(row: dict[str, Any]) -> bool:
+    if _as_int(row.get("market_id")) == _FULLTIME_MARKET_ID:
+        return True
+    market = row.get("market") if isinstance(row.get("market"), dict) else {}
+    texts = (
+        row.get("market_description"),
+        row.get("market_name"),
+        market.get("name"),
+        market.get("developer_name"),
+    )
+    for text in texts:
+        if not text:
+            continue
+        normalized = str(text).strip().lower().replace("_", " ")
+        if normalized in _FULLTIME_MARKET_NAMES:
+            return True
+    return False
+
+
+def _outcome_side(value: Any) -> str | None:
+    if value is None:
+        return None
+    return _OUTCOME_SIDES.get(str(value).strip().lower())
+
+
+def _decimal_price(value: Any) -> float | None:
+    try:
+        price = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(price) or price <= 1.0:
+        return None
+    return price
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None

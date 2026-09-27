@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from laliga.data.parse import MATCH_COLUMNS, empty_matches
+from laliga.data.parse import MATCH_COLUMNS, OPTIONAL_FLOAT_COLUMNS, empty_matches
 
 
 class MatchStore:
@@ -69,7 +69,11 @@ def _coerce(frame: pd.DataFrame) -> pd.DataFrame:
     for column in MATCH_COLUMNS:
         if column not in frame.columns:
             frame[column] = pd.NA
-    frame = frame[MATCH_COLUMNS].copy()
+    keep = list(MATCH_COLUMNS)
+    for column in OPTIONAL_FLOAT_COLUMNS:
+        if column in frame.columns:
+            keep.append(column)
+    frame = frame[keep].copy()
     frame["starting_at"] = pd.to_datetime(frame["starting_at"], utc=True, errors="coerce")
     for column in (
         "fixture_id",
@@ -85,6 +89,9 @@ def _coerce(frame: pd.DataFrame) -> pd.DataFrame:
         "away_goals_ft",
     ):
         frame[column] = pd.to_numeric(frame[column], errors="coerce").astype("Int64")
+    for column in OPTIONAL_FLOAT_COLUMNS:
+        if column in frame.columns:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
     for column in (
         "season_name",
         "round_name",

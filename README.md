@@ -178,6 +178,35 @@ python -m laliga backtest --min-train 320 --output data/predictions/backtest.jso
 
 基准是训练集里的历史频率：全场/半场胜平负各加 1 次伪计数后的全局比例（每场比赛用同一组概率），前三比分是训练集里最常见的三个比分。基准不用球队信息。
 
+### XGBoost 对照
+
+Dixon–Coles 仍是 `train`、`predict`、操作台和每日更新使用的模型。梯度提升树只作为对照，放在同一次走步里和 Dixon–Coles、历史频率基准比。它不进默认的 `backtest`，所以日常更新不会因为多训一套树而变慢。
+
+对照命令只读本地已经下载的 `matches.csv`，不访问 SportMonks：
+
+```bash
+python -m laliga compare --min-train 320 --output data/predictions/model_comparison.json
+```
+
+终端会打印全场对数损失、Brier、命中率、场次、校准，以及「每场对数损失之差」的均值和 95% bootstrap 区间，并把同一份结果写入上面的 JSON。没有本地完场比赛时命令会失败并说明原因，不会编造数字。操作台的「回测结果」页在这个文件存在时显示这张表；文件不存在时只提示上面的命令，不显示占位数字。示例模式（`--demo`）不显示这份对照。
+
+树是固定的浅设置：深度 3、学习率 0.05、最多 200 棵、种子 7。每个训练窗口内部按时间留出最后一段做早停，评测日不参与早停，也不做针对回测期的网格搜索。
+
+不用赔率时的特征（全部来自开球前）：
+
+- 近 5 场积分、进球、失球；主队的主场近况和客队的客场近况；本赛季至今的积分和进失球；已赛场次；休息天数（最多按 30 天计）
+- 近 5 场半场进球、失球
+- 若比赛表里有 `home_xg` / `away_xg`：更早比赛的 xG。本场 xG 是赛后数据，不会当成这场的特征
+- 截至该日 00:00 UTC 的 Dixon–Coles 攻防、期望进球和胜平负概率（全场和半场）
+
+同一 UTC 日的比赛互相看不见。这和 Dixon–Coles 走步一致：评测某一天时，当天早场的结果也不进训练。
+
+赔率是可选的。列可以是十进制赔率 `odds_home`、`odds_draw`、`odds_away`，或已经是概率的 `implied_home`、`implied_draw`、`implied_away`。有可用赔率时，命令会多训练一个「含赔率」模型，并把隐含概率归一化（去掉水位）。没有这些列，或最早一个评测窗口里还没有完整赔率时，含赔率模型不运行，输出里会写明原因。含赔率的结果回答的是「盘口之外还剩多少信息」，不要和不用赔率的对数损失直接当成同一个问题。
+
+默认 `fetch` 仍只请求 `participants;scores;state;round;season`，不会为了对照去拉 xG 或赔率，因此也不会拖慢每日更新。若响应里已经带了 `xgfixture`（type 5304，Expected Goals）或赛前 `odds` / `premiumOdds` 的全场胜平负（market id 1），解析器会把它们写入比赛表。滚球赔率（`inplayOdds`）不会被读取。
+
+`xgboost==3.2.0` 在依赖里。这个版本提供 Windows 的 `py3-none-win_amd64` 轮子，可在 Python 3.13 上安装，不必从源码编译。Windows 上若导入失败，先安装微软的 Visual C++ 可再发行组件。
+
 ### 预测
 
 下一轮（同一 `season_id` + `round_id` 里最早一场未开赛比赛所在的轮次；没有轮次号时用最早那天）：
@@ -231,7 +260,7 @@ python -m laliga predict --from 2026-09-26 --to 2026-10-05 \
 pytest -q
 ```
 
-测试不访问真实的 SportMonks。解析器用文档里的比分结构（含半场、90 分钟、加时里 `CURRENT` 与 `2ND_HALF` 的差别）；HTTP 客户端用假传输检查分页、429、限流和“缓存里不能出现 token”；模型用合成赛程做拟合、梯度核对、未来比赛不能泄漏进训练，以及走步回测对历史频率基准的比较。`demo` / `predict --next` 也在子进程里离线跑通。
+测试不访问真实的 SportMonks。解析器用文档里的比分结构（含半场、90 分钟、加时里 `CURRENT` 与 `2ND_HALF` 的差别）；HTTP 客户端用假传输检查分页、429、限流和“缓存里不能出现 token”；模型用合成赛程做拟合、梯度核对、未来比赛不能泄漏进训练，以及走步回测对历史频率基准的比较。XGBoost 对照在合成赛程上和同一次 Dixon–Coles 走步对齐，并检查本场比分、本场 xG、同一天早场和未来比赛不会进入赛前特征。`demo` / `predict --next` 也在子进程里离线跑通。
 
 操作台测试用 Playwright 打开真实页面，点每一个按钮，并跟着每一个站内链接和页脚外链走一遍。没有 token 时断言空状态和明确报错。带 token 的用例把 `SPORTMONKS_API_BASE` 指到本机的一个 HTTP 服务，响应外形与 SportMonks v3 相同（`data` / `pagination` / `rate_limit`，以及 401、403、429），真正的 `requests` 客户端会去请求它。日常使用不要设置 `SPORTMONKS_API_BASE`。首次跑这组测试需要：
 
@@ -242,13 +271,14 @@ python -m playwright install --with-deps chromium
 ## 目录
 
 ```
-laliga/            命令行、SportMonks 客户端、Dixon–Coles 模型、回测、操作台
+laliga/            命令行、SportMonks 客户端、Dixon–Coles 模型、XGBoost 对照、回测、操作台
 laliga/templates/  操作台页面
 laliga/static/     操作台样式
 tests/             离线测试，含操作台点击测试和 SportMonks 外形的本地 HTTP 模拟
 data/cache/        原始 API 响应（git 忽略）
 data/processed/    matches.csv、seasons.json
 data/models/       dixon_coles.json
+data/predictions/  预测、回测，以及 compare 写出的 model_comparison.json
 data/demo/         demo 命令的合成数据
 data/web-demo/     python -m laliga web --demo 的合成数据
 ```
@@ -271,6 +301,10 @@ python -m laliga predict --from 2026-09-26 --to 2026-10-05 \
   --csv data/predictions/next.csv --json data/predictions/next.json
 ```
 
-以后每周更新：`python -m laliga fetch`（或预测时加 `--refresh`），然后 `python -m laliga train` 与 `python -m laliga predict --next`。
+以后每周更新：`python -m laliga fetch`（或预测时加 `--refresh`），然后 `python -m laliga train` 与 `python -m laliga predict --next`。每周更新不要跑 `compare`；想看 XGBoost 是否更好时再单独执行：
+
+```bash
+python -m laliga compare --min-train 320 --output data/predictions/model_comparison.json
+```
 
 开发时没有用真实 token 调过接口。分页、比分字段和联赛 ID 按 SportMonks 公开的 v3 文档实现；订阅若不含历史赛季或 `participants` / `scores` include，`fetch` 会把接口返回的错误（以及“免费计划不含西甲”）直接打出来。
