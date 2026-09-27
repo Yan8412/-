@@ -294,7 +294,7 @@ def _sentiment_line(info) -> str:
         return "没有该日的市场状态。"
     prev = "无" if not math.isfinite(info.prev_limit_return) else f"{info.prev_limit_return * 100:.2f}%"
     versus = "无" if not math.isfinite(info.index_vs_ma) else f"{info.index_vs_ma * 100:.2f}%"
-    breadth = "无" if not math.isfinite(info.breadth) else f"{info.breadth * 100:.1f}%"
+    breadth = "无" if not math.isfinite(info.breadth) else f"{info.breadth * 100:.2f}%"
     return (
         f"涨停 {info.limit_up_count} 家，炸板率 {info.broken_rate * 100:.1f}%，"
         f"最高连板 {info.max_height}，昨日涨停今日平均涨跌 {prev}，"

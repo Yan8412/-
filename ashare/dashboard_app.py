@@ -188,7 +188,7 @@ def _market_banner() -> None:
     versus = snapshot.get("index_vs_ma")
     prev = snapshot.get("prev_limit_return")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("站上 MA20", "—" if breadth is None else f"{float(breadth) * 100:.1f}%")
+    c1.metric("站上 MA20", "—" if breadth is None else f"{float(breadth) * 100:.2f}%")
     c2.metric("涨停家数", int(snapshot.get("limit_up_count") or 0))
     c3.metric("炸板率", f"{float(snapshot.get('broken_rate') or 0) * 100:.1f}%")
     c4.metric("最高连板", int(snapshot.get("max_height") or 0))
