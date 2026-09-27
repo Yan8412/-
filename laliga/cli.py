@@ -14,6 +14,7 @@ import pandas as pd
 from laliga.config import DEFAULT_MIN_TRAIN_MATCHES, DEFAULT_SEASONS, DEFAULT_XI, ModelConfig, api_token, project_data_dir
 from laliga.data.client import SportMonksError, open_client
 from laliga.data.fetch import fetch_historical, fetch_window
+from laliga.data.markets import fetch_stored_markets, format_market_fetch
 from laliga.data.parse import fixtures_to_frame
 from laliga.data.store import MatchStore
 from laliga.model.dixon_coles import FitError
@@ -75,6 +76,14 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--refresh", action="store_true", help="忽略本地原始响应缓存，重新请求 API")
     fetch.add_argument("--replace", action="store_true", help="用本次抓取结果覆盖本地比赛表，而不是按 fixture_id 合并")
     fetch.set_defaults(func=cmd_fetch)
+
+    markets = sub.add_parser(
+        "fetch-markets",
+        help="为已经存好的比赛回填赛前 1X2 赔率和 xG（不进每日更新）",
+    )
+    _add_data_dir(markets)
+    markets.add_argument("--refresh", action="store_true", help="忽略本地缓存，并重新请求已经填过的比赛")
+    markets.set_defaults(func=cmd_fetch_markets)
 
     train = sub.add_parser("train", help="用全部完场比赛拟合模型并保存")
     _add_model_args(train)
@@ -163,6 +172,16 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     client = _client(store, refresh=args.refresh)
     frame = fetch_historical(client, store, seasons=args.seasons, replace=args.replace)
     _print_inventory(frame)
+    return 0
+
+
+def cmd_fetch_markets(args: argparse.Namespace) -> int:
+    store = _store(args)
+    if store.load().empty:
+        raise CliError("本地没有比赛。请先 `python -m laliga fetch`，再回填赔率和 xG。", exit_code=2)
+    client = _client(store, refresh=args.refresh)
+    result = fetch_stored_markets(client, store, force=args.refresh)
+    print(format_market_fetch(result))
     return 0
 
 

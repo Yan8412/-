@@ -65,6 +65,8 @@ def test_feature_names_do_not_include_post_match_fields():
     assert LEAKAGE_COLUMNS.isdisjoint(names)
     assert "odds_implied_home" in names
     assert "home_xg_for_5" in names
+    assert "home_xga" in LEAKAGE_COLUMNS
+    assert "away_xga" in LEAKAGE_COLUMNS
     without = set(model_feature_names(use_xg=False, use_odds=False))
     assert "odds_implied_home" not in without
     assert "home_xg_for_5" not in without
@@ -92,6 +94,7 @@ def test_rolling_features_ignore_the_match_itself_same_day_results_and_the_futur
     # Next week sees only the previous date: team 1 scored 1 and 5, so the mean is 3.
     assert features.loc[3, "home_gf_5"] == pytest.approx(3.0)
     assert features.loc[3, "home_xg_for_5"] == pytest.approx((1.1 + 4.0) / 2)
+    assert features.loc[3, "home_xg_against_5"] == pytest.approx((0.4 + 0.1) / 2)
     assert features.loc[3, "home_matches"] == 2
     assert 6 < features.loc[3, "home_rest_days"] < 8
 
@@ -111,9 +114,12 @@ def test_rolling_features_ignore_the_match_itself_same_day_results_and_the_futur
     own = [dict(row) for row in rows]
     own[2]["home_goals_ft"] = 7
     own[2]["home_xg"] = 6.0
+    own[2]["home_xga"] = 9.0
+    own[2]["away_xga"] = 9.0
     own_features = compute_rolling_features(_frame(own), use_xg=True).set_index("fixture_id")
     assert own_features.loc[3, "home_gf_5"] == pytest.approx(features.loc[3, "home_gf_5"])
     assert own_features.loc[3, "home_xg_for_5"] == pytest.approx(features.loc[3, "home_xg_for_5"])
+    assert own_features.loc[3, "home_xg_against_5"] == pytest.approx(features.loc[3, "home_xg_against_5"])
 
 
 def test_odds_features_use_only_this_rows_prices():
@@ -257,6 +263,11 @@ def test_odds_that_start_after_the_first_window_do_not_change_the_match_set():
     assert report.odds_used is False
     assert any("最早一个评测日" in note for note in report.notes)
     assert report.models["xgboost"].n == report.models["dixon_coles"].n
+    assert "market" in report.models
+    assert 1 <= report.models["market"].n <= 8
+    assert report.models["market"].n <= report.models["dixon_coles"].n
+    if report.models["market"].n < report.models["dixon_coles"].n:
+        assert any("赛前赔率基准只统计" in note for note in report.notes)
 
 
 def test_absent_odds_are_reported_instead_of_a_second_model():

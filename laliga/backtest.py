@@ -143,6 +143,7 @@ MODEL_LABELS = {
     "baseline": "历史频率基准",
     "xgboost": "XGBoost（无赔率）",
     "xgboost_with_odds": "XGBoost（含赔率）",
+    "market": "赛前赔率（去水位）",
 }
 
 
@@ -321,8 +322,17 @@ def compare_models(matches: pd.DataFrame, config: ModelConfig, xgb_config=None) 
         key: calibration_summary(y_ft, np.array([row[f"{key}_ft_probs"] for row in eval_rows], dtype=float))
         for key in model_keys
     }
+    market_rows = [row for row in eval_rows if row.get("market_ft_probs") is not None]
+    if market_rows:
+        models["market"] = summarize_rows(market_rows, "market")
+        calibration["market"] = calibration_summary(
+            np.array([row["y_ft"] for row in market_rows], dtype=int),
+            np.array([row["market_ft_probs"] for row in market_rows], dtype=float),
+        )
     paired = _paired_block(eval_rows, y_ft, xgb_config.seed)
-    odds_coverage = _odds_coverage(finished, [row["fixture_id"] for row in eval_rows]) if use_odds else None
+    odds_coverage = (
+        _odds_coverage(finished, [row["fixture_id"] for row in eval_rows]) if odds_status == "present" else None
+    )
     notes = _comparison_notes(
         xg_status=xg_status,
         odds_status=odds_status,
@@ -330,6 +340,13 @@ def compare_models(matches: pd.DataFrame, config: ModelConfig, xgb_config=None) 
         odds_present_in_first_window=odds_present_in_first_window,
         xg_features_used=xg_features_used,
     )
+    if market_rows and len(market_rows) != len(eval_rows):
+        notes.append(
+            f"赛前赔率基准只统计有完整赛前 1X2 的 {len(market_rows)} 场评测比赛，"
+            f"少于其他模型的 {len(eval_rows)} 场。配对区间也只用这 {len(market_rows)} 场。"
+        )
+    elif market_rows:
+        notes.append("赛前赔率基准是各家开赛前 1X2 隐含概率的平均，再去掉水位。它不用模型，也不用本场 xG。")
     return ComparisonReport(
         n_folds=folds,
         first_test_day=None if first_day is None else pd.Timestamp(first_day).date().isoformat(),
@@ -419,7 +436,18 @@ def _feature_row(match: pd.Series, rolling: pd.DataFrame, model: ScorelineModel 
 
 
 LEAKAGE_NAMES = frozenset(
-    {"home_goals_ft", "away_goals_ft", "home_goals_ht", "away_goals_ht", "home_xg", "away_xg", "y_ft", "y_ht"}
+    {
+        "home_goals_ft",
+        "away_goals_ft",
+        "home_goals_ht",
+        "away_goals_ht",
+        "home_xg",
+        "away_xg",
+        "home_xga",
+        "away_xga",
+        "y_ft",
+        "y_ht",
+    }
 )
 
 
@@ -450,6 +478,13 @@ def _comparison_row(match, model: ScorelineModel, baseline, ft_probs, ht_probs, 
     if odds_ft is not None:
         row["xgboost_with_odds_ft_probs"] = _prob_tuple(odds_ft)
         row["xgboost_with_odds_ht_probs"] = None if odds_ht is None else _prob_tuple(odds_ht)
+    implied = odds_features(match)
+    if all(math.isfinite(implied[name]) for name in ODDS_FEATURES):
+        row["market_ft_probs"] = (
+            implied["odds_implied_home"],
+            implied["odds_implied_draw"],
+            implied["odds_implied_away"],
+        )
     return row
 
 
@@ -488,14 +523,29 @@ def _paired_block(rows: list[dict], y_ft: np.ndarray, seed: int) -> list[dict]:
         )
     compared = []
     for challenger, reference, label in pairs:
-        stats = paired_logloss_difference(
-            y_ft,
-            np.array([row[f"{challenger}_ft_probs"] for row in rows], dtype=float),
-            np.array([row[f"{reference}_ft_probs"] for row in rows], dtype=float),
-            seed=seed,
-        )
-        compared.append({"challenger": challenger, "reference": reference, "label": label, **stats})
+        compared.append(_pair_stats(rows, y_ft, challenger, reference, label, seed))
+    market_rows = [row for row in rows if row.get("market_ft_probs") is not None]
+    if market_rows:
+        y_market = np.array([row["y_ft"] for row in market_rows], dtype=int)
+        market_pairs = [
+            ("xgboost", "market", "XGBoost（无赔率）− 赛前赔率（去水位）"),
+            ("dixon_coles", "market", "Dixon–Coles − 赛前赔率（去水位）"),
+        ]
+        if market_rows[0].get("xgboost_with_odds_ft_probs") is not None:
+            market_pairs.append(("xgboost_with_odds", "market", "XGBoost（含赔率）− 赛前赔率（去水位）"))
+        for challenger, reference, label in market_pairs:
+            compared.append(_pair_stats(market_rows, y_market, challenger, reference, label, seed))
     return compared
+
+
+def _pair_stats(rows: list[dict], y_ft: np.ndarray, challenger: str, reference: str, label: str, seed: int) -> dict:
+    stats = paired_logloss_difference(
+        y_ft,
+        np.array([row[f"{challenger}_ft_probs"] for row in rows], dtype=float),
+        np.array([row[f"{reference}_ft_probs"] for row in rows], dtype=float),
+        seed=seed,
+    )
+    return {"challenger": challenger, "reference": reference, "label": label, **stats}
 
 
 def _odds_coverage(finished: pd.DataFrame, fixture_ids: list[int]) -> float:
@@ -528,7 +578,10 @@ def _comparison_notes(
     elif xg_status == "empty":
         notes.append("比赛表有 home_xg 和 away_xg 列，但没有数值，所以没有使用 xG。")
     elif xg_status == "absent":
-        notes.append("比赛表没有 home_xg 和 away_xg。当前默认 fetch 不请求 xGFixture，所以这次没有 xG 特征。")
+        notes.append(
+            "比赛表没有 home_xg 和 away_xg。默认 fetch 不请求 xGFixture。"
+            "回填命令是 python -m laliga fetch-markets。"
+        )
     else:
         notes.append("存储的 xG 没有进入任何训练窗口的可用特征。")
     if use_odds:
@@ -541,7 +594,7 @@ def _comparison_notes(
         notes.append(
             "比赛表没有赛前赔率列（十进制赔率 odds_home、odds_draw、odds_away，"
             "或已经是概率的 implied_home、implied_draw、implied_away）。"
-            "含赔率的 XGBoost 没有运行。当前默认 fetch 不请求 odds。"
+            "含赔率的 XGBoost 没有运行。回填命令是 python -m laliga fetch-markets。"
         )
     return notes
 

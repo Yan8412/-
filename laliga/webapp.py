@@ -564,6 +564,7 @@ def _comparison_view(payload: dict) -> dict:
     labels = (
         ("dixon_coles", "Dixon–Coles"),
         ("baseline", "历史频率基准"),
+        ("market", "赛前赔率（去水位）"),
         ("xgboost", "XGBoost（无赔率）"),
         ("xgboost_with_odds", "XGBoost（含赔率）"),
     )

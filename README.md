@@ -47,6 +47,8 @@
 2. `GET /fixtures?filters=fixtureSeasons:{赛季ID}&include=participants;scores;state;round;season`，用游标把该赛季拉完。真实接口的 `next_cursor` 是一条完整 URL，程序只取出里面的 `cursor` 值，并且翻页时不再带 `per_page`（两个一起送会 HTTP 400；把整段 URL 当作 cursor 也会 400）。游标页往往只有 `has_more` 和 `next_cursor`，`has_more` 为 false 就停止。没有游标时跟随 `next_page`，再退回页码
 3. 预测某一段日期时，用 `GET /fixtures/between/{开始}/{结束}?filters=fixtureLeagues:564`。这个接口单次最长 100 天，更长的区间会自动拆开
 
+赛前赔率和 xG 不在上面这条默认请求里，所以每天的 `fetch` 和操作台「更新数据」不会变慢。需要它们时单独回填（见下文）。
+
 主客队来自 `participants[].meta.location`（`home` / `away`）。比分来自 `scores[].description`：
 
 | description | 含义 |
@@ -201,9 +203,27 @@ python -m laliga compare --min-train 320 --output data/predictions/model_compari
 
 同一 UTC 日的比赛互相看不见。这和 Dixon–Coles 走步一致：评测某一天时，当天早场的结果也不进训练。
 
-赔率是可选的。列可以是十进制赔率 `odds_home`、`odds_draw`、`odds_away`，或已经是概率的 `implied_home`、`implied_draw`、`implied_away`。有可用赔率时，命令会多训练一个「含赔率」模型，并把隐含概率归一化（去掉水位）。没有这些列，或最早一个评测窗口里还没有完整赔率时，含赔率模型不运行，输出里会写明原因。含赔率的结果回答的是「盘口之外还剩多少信息」，不要和不用赔率的对数损失直接当成同一个问题。
+赔率是可选的。列可以是十进制赔率 `odds_home`、`odds_draw`、`odds_away`，或已经是概率的 `implied_home`、`implied_draw`、`implied_away`。有可用赔率时，命令会多训练一个「含赔率」模型，并把隐含概率归一化（去掉水位），同时加一行「赛前赔率（去水位）」基准：只用这场开赛前的市场隐含概率，不看球队、不看 xG。没有这些列，或最早一个评测窗口里还没有完整赔率时，含赔率的树不运行，输出里会写明原因。赔率基准只统计评测集里有完整赔率的比赛，场次可以比其他模型少。含赔率的结果回答的是「盘口之外还剩多少信息」，不要和不用赔率的对数损失直接当成同一个问题。
 
-默认 `fetch` 仍只请求 `participants;scores;state;round;season`，不会为了对照去拉 xG 或赔率，因此也不会拖慢每日更新。若响应里已经带了 `xgfixture`（type 5304，Expected Goals）或赛前 `odds` / `premiumOdds` 的全场胜平负（market id 1），解析器会把它们写入比赛表。滚球赔率（`inplayOdds`）不会被读取。
+### 回填赛前赔率和 xG
+
+默认 `fetch` 仍只请求 `participants;scores;state;round;season`。本地 `matches.csv` 有比赛之后，用下面这条命令补赛前全场胜平负和每队 xG。它不进每日更新，也不进操作台「更新数据」：
+
+```bash
+python -m laliga fetch-markets
+python -m laliga compare --min-train 320 --output data/predictions/model_comparison.json
+```
+
+第一条按已经存好的 `fixture_id` 请求 SportMonks v3，原始 JSON 同样进 `data/cache/`：
+
+- xG：`GET /fixtures/multi/{ids}?include=xGFixture`，每批最多 50 场。只用 type 5304（Expected Goals）。`home_xg` / `away_xg` 是各方期望进球，`home_xga` 是客队 xG，`away_xga` 是主队 xG。没有 xG 的格子留空。未开赛的比赛不请求 xG，因为这是赛后数据。
+- 赔率：`GET /fixtures/multi/{ids}?include=odds&filters=markets:1`。market id 1 是全场胜平负（Match Winner）。不请求 `inplayOdds`。每家博彩只保留 `latest_bookmaker_update`（没有则用 `updated_at`、`created_at`）严格早于开球的最后一条报价；没有时间戳的报价当作赛前盘保留。三边都齐的博彩才计入。三列 `implied_*` 是这些 `1/小数赔率` 的平均，再除掉水位（三项和为 1）。`odds_*` 是这些概率的倒数，所以是去水位之后的价格，不是某一家的原始报价。开球时刻及之后的报价会被丢掉。
+
+订阅没有 Odds & Predictions 或 Pressure Index & xG 时，对应请求返回 HTTP 403，命令会写明缺哪个附加包并停掉这一路，另一路照常写回，不会抛出未处理的异常。某一场没有数据就留空。已经填好的完场比赛下次会跳过；上次确认没有数据的完场比赛也会跳过。未开赛比赛的赔率每次都会重拉，因为收盘价还在变。`--refresh` 忽略缓存并重新请求全部。新抓下来的比分不会把已经回填的赔率或 xG 盖成空值。
+
+xG 进 XGBoost 时只作为**更早比赛**的滚动均值（近 5 场 xG 和 xGA）。本场的 `home_xg` / `away_xg` / `home_xga` / `away_xga` 不是这场的特征。本场赛前赔率可以是这场的特征。
+
+若某次赛程响应里已经带了 `xgfixture`（或文档示例里的 `expected` 数组）或赛前 `odds` / `premiumOdds`，解析器会按同样的规则写入比赛表。滚球赔率仍然不读。
 
 `xgboost==3.2.0` 在依赖里。这个版本提供 Windows 的 `py3-none-win_amd64` 轮子，可在 Python 3.13 上安装，不必从源码编译。Windows 上若导入失败，先安装微软的 Visual C++ 可再发行组件。
 
@@ -301,9 +321,10 @@ python -m laliga predict --from 2026-09-26 --to 2026-10-05 \
   --csv data/predictions/next.csv --json data/predictions/next.json
 ```
 
-以后每周更新：`python -m laliga fetch`（或预测时加 `--refresh`），然后 `python -m laliga train` 与 `python -m laliga predict --next`。每周更新不要跑 `compare`；想看 XGBoost 是否更好时再单独执行：
+以后每周更新：`python -m laliga fetch`（或预测时加 `--refresh`），然后 `python -m laliga train` 与 `python -m laliga predict --next`。每周更新不要跑 `compare`。想把赔率和 xG 补进本地表、再和 Dixon–Coles 比较时：
 
 ```bash
+python -m laliga fetch-markets
 python -m laliga compare --min-train 320 --output data/predictions/model_comparison.json
 ```
 

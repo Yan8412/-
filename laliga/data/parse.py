@@ -60,9 +60,14 @@ MATCH_COLUMNS = [
 OPTIONAL_FLOAT_COLUMNS = [
     "home_xg",
     "away_xg",
+    "home_xga",
+    "away_xga",
     "odds_home",
     "odds_draw",
     "odds_away",
+    "implied_home",
+    "implied_draw",
+    "implied_away",
 ]
 
 _XG_TYPE_ID = 5304
@@ -151,8 +156,8 @@ def parse_fixture(fixture: dict[str, Any]) -> dict[str, Any] | None:
     season = fixture.get("season") or {}
     round_obj = fixture.get("round") or {}
     status = _status(state_name, state_id, ft)
-    home_xg, away_xg = _team_xg(fixture, home_id, away_id)
-    odds_home, odds_draw, odds_away = _prematch_decimal_odds(fixture)
+    home_xg, away_xg, home_xga, away_xga = team_expected_goals(fixture, home_id, away_id)
+    prices = aggregate_prematch_1x2(_prematch_odd_rows(fixture), kickoff=fixture.get("starting_at"))
     return {
         "fixture_id": fixture.get("id"),
         "league_id": fixture.get("league_id"),
@@ -174,9 +179,14 @@ def parse_fixture(fixture: dict[str, Any]) -> dict[str, Any] | None:
         "status": status,
         "home_xg": home_xg,
         "away_xg": away_xg,
-        "odds_home": odds_home,
-        "odds_draw": odds_draw,
-        "odds_away": odds_away,
+        "home_xga": home_xga,
+        "away_xga": away_xga,
+        "odds_home": prices["odds_home"],
+        "odds_draw": prices["odds_draw"],
+        "odds_away": prices["odds_away"],
+        "implied_home": prices["implied_home"],
+        "implied_draw": prices["implied_draw"],
+        "implied_away": prices["implied_away"],
     }
 
 
@@ -269,12 +279,92 @@ def _status(state_name: str | None, state_id: Any, ft: tuple[int, int] | None) -
     return "skipped"
 
 
+def team_expected_goals(
+    fixture: dict[str, Any], home_id: int, away_id: int
+) -> tuple[float | None, float | None, float | None, float | None]:
+    """Per-team xG (type 5304) and xGA.
+
+    xGA is the opponent's xG from the same match. Both numbers are post-match.
+    ``xGFixture`` may arrive as ``xgfixture`` or, in the expected-include
+    examples, as ``expected``. Expected goals on target (type 5305) are ignored.
+    """
+
+    home_xg, away_xg = _team_xg(fixture, home_id, away_id)
+    return home_xg, away_xg, away_xg, home_xg
+
+
+def aggregate_prematch_1x2(rows: list[dict[str, Any]], *, kickoff: Any = None) -> dict[str, float | None]:
+    """Market-average pre-kickoff 1X2, with the overround removed.
+
+    Each bookmaker contributes at most one home, draw, and away price: the
+    latest quote whose ``latest_bookmaker_update`` (else ``updated_at``, else
+    ``created_at``) is strictly before kickoff. A quote with no timestamp is
+    kept, because the standard pre-match feed does not send in-play rows.
+    Bookmakers missing any side are dropped. The three outcomes are the mean
+    of ``1/decimal`` across the remaining books, divided by their sum.
+    Stored decimals are the reciprocal of those probabilities, so they match
+    the de-vigged prices rather than any single raw book.
+    """
+
+    empty = {
+        "odds_home": None,
+        "odds_draw": None,
+        "odds_away": None,
+        "implied_home": None,
+        "implied_draw": None,
+        "implied_away": None,
+    }
+    kickoff_at = _as_utc(kickoff)
+    chosen: dict[tuple[int, str], tuple[pd.Timestamp | None, float]] = {}
+    for row in rows:
+        if not isinstance(row, dict) or not _is_fulltime_result_market(row):
+            continue
+        if row.get("inplay") is True or row.get("is_live") is True:
+            continue
+        if not _is_before_kickoff(row, kickoff_at):
+            continue
+        side = _outcome_side(row.get("label")) or _outcome_side(row.get("name")) or _outcome_side(row.get("original_label"))
+        price = _decimal_price(row.get("value"))
+        book_id = _as_int(row.get("bookmaker_id"))
+        if side is None or price is None or book_id is None:
+            continue
+        stamp = _price_time(row)
+        current = chosen.get((book_id, side))
+        if current is None or _is_newer_quote(stamp, current[0]):
+            chosen[(book_id, side)] = (stamp, price)
+    by_book: dict[int, dict[str, float]] = {}
+    for (book_id, side), (_, price) in chosen.items():
+        by_book.setdefault(book_id, {})[side] = price
+    complete = [prices for prices in by_book.values() if {"home", "draw", "away"} <= set(prices)]
+    if not complete:
+        return empty
+    raw = []
+    for side in ("home", "draw", "away"):
+        raw.append(sum(1.0 / prices[side] for prices in complete) / len(complete))
+    total = sum(raw)
+    if total <= 0.0 or not math.isfinite(total):
+        return empty
+    implied = [value / total for value in raw]
+    odds = [1.0 / value for value in implied]
+    return {
+        "odds_home": odds[0],
+        "odds_draw": odds[1],
+        "odds_away": odds[2],
+        "implied_home": implied[0],
+        "implied_draw": implied[1],
+        "implied_away": implied[2],
+    }
+
+
 def _team_xg(fixture: dict[str, Any], home_id: int, away_id: int) -> tuple[float | None, float | None]:
     """Full-time expected goals (type 5304) for the two sides. Other xG types are ignored."""
 
-    chunk = fixture.get("xgfixture")
-    if chunk is None:
-        chunk = fixture.get("xGFixture")
+    chunk = None
+    for key in ("xgfixture", "xGFixture", "expected"):
+        candidate = fixture.get(key)
+        if isinstance(candidate, list):
+            chunk = candidate
+            break
     if not isinstance(chunk, list):
         return None, None
     home: float | None = None
@@ -315,31 +405,49 @@ def _xg_value(row: dict[str, Any]) -> float | None:
     return value
 
 
-def _prematch_decimal_odds(fixture: dict[str, Any]) -> tuple[float | None, float | None, float | None]:
-    """One bookmaker's pre-match 1X2 decimals. In-play prices are never read."""
+def _prematch_odd_rows(fixture: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pre-match quotes embedded on a fixture. ``inplayOdds`` is never read."""
 
     rows: list[dict[str, Any]] = []
     for key in ("odds", "premiumOdds", "premiumodds"):
         chunk = fixture.get(key)
         if isinstance(chunk, list):
             rows.extend(item for item in chunk if isinstance(item, dict))
-    by_book: dict[int, dict[str, float]] = {}
-    for row in rows:
-        if not _is_fulltime_result_market(row):
-            continue
-        side = _outcome_side(row.get("label")) or _outcome_side(row.get("name")) or _outcome_side(row.get("original_label"))
-        price = _decimal_price(row.get("value"))
-        if side is None or price is None:
-            continue
-        book_id = _as_int(row.get("bookmaker_id"))
-        if book_id is None:
-            book_id = 10**9
-        by_book.setdefault(book_id, {})[side] = price
-    complete = {book: prices for book, prices in by_book.items() if {"home", "draw", "away"} <= set(prices)}
-    if not complete:
-        return None, None, None
-    chosen = complete[min(complete)]
-    return chosen["home"], chosen["draw"], chosen["away"]
+    return rows
+
+
+def _as_utc(value: Any) -> pd.Timestamp | None:
+    if value is None or value == "":
+        return None
+    stamp = pd.to_datetime(value, utc=True, errors="coerce")
+    if pd.isna(stamp):
+        return None
+    return pd.Timestamp(stamp)
+
+
+def _price_time(row: dict[str, Any]) -> pd.Timestamp | None:
+    for key in ("latest_bookmaker_update", "updated_at", "created_at"):
+        stamp = _as_utc(row.get(key))
+        if stamp is not None:
+            return stamp
+    return None
+
+
+def _is_before_kickoff(row: dict[str, Any], kickoff: pd.Timestamp | None) -> bool:
+    if kickoff is None:
+        return True
+    stamp = _price_time(row)
+    if stamp is None:
+        return True
+    return stamp < kickoff
+
+
+def _is_newer_quote(stamp: pd.Timestamp | None, previous: pd.Timestamp | None) -> bool:
+    if stamp is None:
+        return previous is None
+    if previous is None:
+        return True
+    return stamp >= previous
 
 
 def _is_fulltime_result_market(row: dict[str, Any]) -> bool:

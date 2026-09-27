@@ -87,6 +87,8 @@ LEAKAGE_COLUMNS = frozenset(
         "away_goals_ht",
         "home_xg",
         "away_xg",
+        "home_xga",
+        "away_xga",
         "y_ft",
         "y_ht",
         "score",

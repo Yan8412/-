@@ -36,8 +36,7 @@ class MatchStore:
         if current.empty:
             merged = incoming
         else:
-            merged = pd.concat([current, incoming], ignore_index=True)
-            merged = merged.drop_duplicates("fixture_id", keep="last")
+            merged = _overlay(current, incoming)
         merged = merged.sort_values(["starting_at", "fixture_id"]).reset_index(drop=True)
         self._write(merged)
         return merged
@@ -61,6 +60,20 @@ class MatchStore:
         if not out.empty and pd.api.types.is_datetime64_any_dtype(out["starting_at"]):
             out["starting_at"] = out["starting_at"].dt.strftime("%Y-%m-%d %H:%M:%S%z")
         out.to_csv(self.processed_path, index=False)
+
+
+def _overlay(current: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
+    """Incoming scores replace stored ones. A blank odds or xG cell does not.
+
+    The daily fixture fetch does not request markets, so its rows carry empty
+    optional columns. Those must not wipe a backfill already saved on the
+    same fixture_id.
+    """
+
+    current_indexed = current.drop_duplicates("fixture_id", keep="last").set_index("fixture_id")
+    incoming_indexed = incoming.drop_duplicates("fixture_id", keep="last").set_index("fixture_id")
+    merged = incoming_indexed.combine_first(current_indexed)
+    return _coerce(merged.reset_index())
 
 
 def _coerce(frame: pd.DataFrame) -> pd.DataFrame:

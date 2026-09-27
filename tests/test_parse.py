@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from laliga.data.parse import fixtures_to_frame, parse_fixture
 
@@ -172,11 +173,27 @@ def test_prematch_xg_and_odds_are_stored_and_inplay_is_ignored():
             {"market_id": 1, "bookmaker_id": 2, "label": "Draw", "value": "9.9"},
             {"market_id": 1, "bookmaker_id": 2, "label": "Away", "value": "9.9"},
         ],
+        "premiumOdds": [
+            {"market_id": 1, "bookmaker_id": 9, "label": "Home", "value": "1.05", "latest_bookmaker_update": "2024-03-01 21:00:00"},
+            {"market_id": 1, "bookmaker_id": 9, "label": "Draw", "value": "1.05", "latest_bookmaker_update": "2024-03-01 21:00:00"},
+            {"market_id": 1, "bookmaker_id": 9, "label": "Away", "value": "1.05", "latest_bookmaker_update": "2024-03-01 21:00:00"},
+        ],
     }
     row = parse_fixture(fixture)
     assert row["home_xg"] == 1.5
     assert row["away_xg"] == 0.4
-    assert (row["odds_home"], row["odds_draw"], row["odds_away"]) == (1.8, 3.5, 4.4)
+    assert row["home_xga"] == 0.4
+    assert row["away_xga"] == 1.5
+    home_raw = ((1 / 1.8) + (1 / 2.0)) / 2
+    draw_raw = ((1 / 3.5) + (1 / 3.2)) / 2
+    away_raw = ((1 / 4.4) + (1 / 4.1)) / 2
+    total = home_raw + draw_raw + away_raw
+    assert row["implied_home"] == pytest.approx(home_raw / total)
+    assert row["implied_draw"] == pytest.approx(draw_raw / total)
+    assert row["implied_away"] == pytest.approx(away_raw / total)
+    assert row["odds_home"] == pytest.approx(total / home_raw)
+    assert row["odds_home"] != pytest.approx(1.8)
+    assert abs(row["implied_home"] + row["implied_draw"] + row["implied_away"] - 1) < 1e-12
     frame = fixtures_to_frame([fixture])
     assert frame.loc[0, "home_xg"] == 1.5
     assert list(frame.columns).index("odds_away") > list(frame.columns).index("status")

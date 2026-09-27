@@ -107,7 +107,7 @@
 {% elif not demo %}
 <section class="panel">
   <h2>XGBoost 对照</h2>
-  <p class="muted">Dixon–Coles 仍是预测模型。「运行回测」不会训练 XGBoost。要在同一批比赛上比较，在已下载的本地数据上运行 <code>python -m laliga compare --min-train 320 --output data/predictions/model_comparison.json</code>。没有这个结果文件时，这里不显示数字。</p>
+  <p class="muted">Dixon–Coles 仍是预测模型。「运行回测」不会训练 XGBoost，也不会下载赔率或 xG。回填用 <code>python -m laliga fetch-markets</code>，然后在已下载的本地数据上运行 <code>python -m laliga compare --min-train 320 --output data/predictions/model_comparison.json</code>。没有这个结果文件时，这里不显示数字。</p>
 </section>
 {% endif %}
 {% endblock %}
