@@ -149,7 +149,7 @@ def _run_daily_update() -> None:
     from ashare.pipeline import run_daily
 
     settings = load_settings(default_config_path())
-    with st.spinner("正在更新行情并重算候选。这只写模拟盘委托，不会向券商下单。"):
+    with st.spinner("正在更新行情、结算模拟盘并重算候选。这只写模拟盘委托，不会向券商下单。"):
         try:
             written = run_daily(settings, date.today(), CACHE_DIR, REPORT_DIR, LEDGER_PATH)
         except Exception as exc:  # noqa: BLE001 - show the failure on the page
@@ -197,7 +197,9 @@ def _market_banner() -> None:
         extra.append(f"等权指数相对均线 {float(versus) * 100:.2f}%")
     if prev is not None:
         extra.append(f"昨日涨停今日平均 {float(prev) * 100:.2f}%")
-    if snapshot.get("model_ready"):
+    if snapshot.get("use_ranker") is False:
+        extra.append("排序模型已关闭")
+    elif snapshot.get("model_ready"):
         extra.append("排序模型已加载")
     else:
         extra.append("排序模型未训练，候选按规则分")

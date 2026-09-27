@@ -19,5 +19,7 @@
   "regime_breadth_min": 0.4,
   "regime_ma_window": 20,
   "regime_min_names": 200,
-  "ml_pool": 80
+  "ml_pool": 80,
+  "strategies": ["first_board_follow", "ma_pullback"],
+  "use_ranker": false
 }

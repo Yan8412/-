@@ -12,7 +12,8 @@ from pathlib import Path
 
 from ashare import __version__
 from ashare.broker.paper import PaperBroker
-from ashare.config import load_settings
+from ashare.config import Settings, load_settings
+from ashare.strategies.library import parse_strategy_ids
 from ashare.paths import cache_dir, default_config_path, ledger_path, report_dir
 from ashare.pipeline import run_daily, run_research, settle_paper
 
@@ -26,13 +27,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=None, help="可选 JSON 配置，默认读取项目根目录的 config.json")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    daily = sub.add_parser("daily", help="收盘后更新数据并写出下一交易日候选")
+    daily = sub.add_parser("daily", help="收盘后更新数据、结算模拟盘并写出下一交易日候选")
     daily.add_argument("--top", type=int, default=None)
     daily.add_argument("--universe", type=int, default=None, help="只用成交额前 N 只；省略则扫描全市场")
     daily.add_argument("--report-dir", type=Path, default=None)
     daily.add_argument("--cache-dir", type=Path, default=None)
     daily.add_argument("--paper", type=Path, default=None)
-    daily.add_argument("--no-paper", action="store_true", help="只出报告，不写入模拟盘委托")
+    daily.add_argument("--no-paper", action="store_true", help="只出报告，不结算也不写入模拟盘委托")
+    daily.add_argument(
+        "--strategies",
+        default=None,
+        help="逗号分隔的策略 id，覆盖 config.json。例如 ma_pullback",
+    )
+    daily.add_argument(
+        "--ranker",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="是否用排序模型。省略时跟随 config.json，未配置则为关闭",
+    )
 
     backtest = sub.add_parser("backtest", help="用已实现的规则跑历史回测和走步样本外")
     backtest.add_argument("--start", default=None, help="YYYY-MM-DD，默认大约两年")
@@ -76,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.universe is not None:
             settings.universe_size = args.universe
             settings.full_market = False
+        apply_daily_overrides(settings, args)
         path = run_daily(
             settings,
             today,
@@ -146,6 +159,14 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.error("未知命令")
     return 2
+
+
+def apply_daily_overrides(settings: Settings, args: argparse.Namespace) -> None:
+    """CLI flags win over config.json. An omitted flag leaves the config value."""
+    if getattr(args, "strategies", None):
+        settings.strategies = parse_strategy_ids(args.strategies)
+    if getattr(args, "ranker", None) is not None:
+        settings.use_ranker = bool(args.ranker)
 
 
 def dashboard_command(

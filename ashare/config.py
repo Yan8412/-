@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from datetime import date
 from pathlib import Path
 
@@ -54,6 +54,13 @@ class Settings:
     regime_ma_window: int = 20
     regime_min_names: int = 200
     ml_pool: int = 80
+    # Daily candidates. Defaults keep the previous book (首板 + 均线回踩).
+    # The ranker failed its one out-of-sample window, so it stays off unless
+    # config or the daily command turns it on. The regime filter stays on.
+    strategies: list[str] = field(
+        default_factory=lambda: ["first_board_follow", "ma_pullback"]
+    )
+    use_ranker: bool = False
 
     def slot_budget(self, equity: float, cash: float) -> float:
         """Cash allocated to one new position, capped by the account rules."""
@@ -73,10 +80,20 @@ def load_settings(path: Path | None = None) -> Settings:
         raise ValueError("config.json 必须是对象")
     known = {item.name for item in fields(settings)}
     data = asdict(settings)
+    special = {"stamp_duty_change", "strategies", "use_ranker"}
     for key, value in payload.items():
-        if key not in known or key == "stamp_duty_change":
+        if key not in known or key in special:
             continue
         data[key] = value
     if "stamp_duty_change" in payload:
         data["stamp_duty_change"] = date.fromisoformat(str(payload["stamp_duty_change"]))
+    if "strategies" in payload:
+        from ashare.strategies.library import parse_strategy_ids
+
+        data["strategies"] = parse_strategy_ids(payload["strategies"])
+    if "use_ranker" in payload:
+        value = payload["use_ranker"]
+        if not isinstance(value, bool):
+            raise ValueError("use_ranker 必须是 JSON 布尔值 true 或 false")
+        data["use_ranker"] = value
     return Settings(**data)

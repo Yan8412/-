@@ -19,6 +19,7 @@ from ashare.backtest.walkforward import (
 from ashare.broker.base import OrderRequest
 from ashare.broker.paper import PaperBroker
 from ashare.config import Settings
+from ashare.data.cache import load_bars
 from ashare.data.sources import MarketData
 from ashare.data.universe import coverage_notes, load_catalog, select_for_download
 from ashare.market import SymbolSeries, build_symbol, mark_listing_censorship, master_calendar
@@ -34,7 +35,7 @@ from ashare.report import (
 from ashare.rules.lots import suggest_shares
 from ashare.rules.money import money
 from ashare.strategies.base import Strategy
-from ashare.strategies.library import builtin_strategies, core_strategies
+from ashare.strategies.library import builtin_strategies, strategies_from_ids
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,7 @@ def _load_full_market(
     catalog, notes = load_catalog(cache_dir, today, source)
     notes.extend(source.notes)
     chosen, stats = select_for_download(catalog, today)
-    fetched = source.fetch_many(
+    errors = source.refresh_many(
         [item.code for item in chosen],
         settings.history_bars,
         today,
@@ -97,19 +98,26 @@ def _load_full_market(
     too_short = 0
     st_skipped = 0
     for item in chosen:
-        outcome = fetched.get(item.code)
-        if outcome is None or isinstance(outcome, BaseException):
-            item.error = "无数据" if outcome is None else str(outcome)
+        failure = errors.get(item.code)
+        if failure:
+            item.error = failure
             continue
-        item.bars = len(outcome)
-        item.last_bar = outcome[-1].date.isoformat() if outcome else None
+        bars, _fetched_at = load_bars(cache_dir, item.code)
+        if not bars:
+            item.error = "无数据"
+            continue
+        item.bars = len(bars)
+        item.last_bar = bars[-1].date.isoformat()
         if is_risk_name(item.name):
             st_skipped += 1
+            del bars
             continue
-        if len(outcome) < settings.min_history_bars + 5:
+        if len(bars) < settings.min_history_bars + 5:
             too_short += 1
+            del bars
             continue
-        series = build_symbol(item.code, item.name, outcome)
+        series = build_symbol(item.code, item.name, bars)
+        del bars
         series.ipo_date = item.ipo()
         series.out_date = item.out()
         symbols.append(series)
@@ -187,7 +195,15 @@ def run_daily(
     report_dir: Path,
     paper_path: Path | None,
 ) -> Path:
+    """Refresh bars, settle an existing paper book, then write the next shortlist.
+
+    ``paper_path`` None (the ``--no-paper`` flag) skips both settlement and new orders.
+    New orders are still withheld when the regime filter is off.
+    """
     symbols, notes, _chosen, _stats = load_universe(settings, today, cache_dir)
+    if paper_path is not None:
+        for line in settle_paper(settings, cache_dir, paper_path, today):
+            logger.info("%s", line)
     attach_inferred_st(symbols)
     panel = build_market_panel(symbols, settings)
     day = latest_common_day(symbols)
@@ -204,15 +220,16 @@ def publish_daily(
     notes: list[str],
 ) -> Path:
     """Write the shortlist for one close. Paper orders are skipped when the regime is off."""
-    pool = max(settings.ml_pool, settings.top_n)
-    rows = build_recommendations(symbols, settings, day, core_strategies(), cap=pool)
-    model = load_ranker()
+    strategies = strategies_from_ids(settings.strategies)
+    model = load_ranker() if settings.use_ranker else None
+    pool = max(settings.ml_pool, settings.top_n) if settings.use_ranker else settings.top_n
+    rows = build_recommendations(symbols, settings, day, strategies, cap=pool)
     rows = _rank_rows(rows, symbols, panel, model, settings)
     info = panel.days.get(day)
     risk_on = bool(info.risk_on) if info is not None else False
-    preface = _daily_preface(settings, day, info, model, risk_on, notes)
+    preface = _daily_preface(settings, day, info, model, risk_on, notes, strategies)
     report_dir.mkdir(parents=True, exist_ok=True)
-    _write_market_snapshot(report_dir, day, info, model is not None)
+    _write_market_snapshot(report_dir, day, info, model is not None, settings.use_ranker)
     markdown = report_dir / f"daily_{day.isoformat()}.md"
     csv_path = report_dir / f"daily_{day.isoformat()}.csv"
     write_recommendations_markdown(markdown, rows, preface)
@@ -264,18 +281,29 @@ def _rank_rows(
     return rows[: settings.top_n]
 
 
-def _daily_preface(settings: Settings, day: date, info, model: dict | None, risk_on: bool, notes: list[str]) -> list[str]:
+def _daily_preface(
+    settings: Settings,
+    day: date,
+    info,
+    model: dict | None,
+    risk_on: bool,
+    notes: list[str],
+    strategies: list[Strategy],
+) -> list[str]:
     if risk_on:
         regime = "行情过滤：允许开新仓（站上 MA20 的股票不少于设定比例，且等权指数在均线之上）。"
     else:
         regime = "今日不开新仓。候选和分数仍列在下面，供核对，这次不会写入模拟盘。"
-    if model is None:
+    if not settings.use_ranker:
+        model_line = "排序模型已关闭，名单按规则分。"
+    elif model is None:
         model_line = "模型未训练，排序用的是规则分。训练命令：python -m ashare train。"
     else:
         model_line = f"模型分数来自梯度提升树，训练截止 {model.get('trained_through', '未知')}（该日之前已经平仓的交易）。"
+    names = "、".join(item.name for item in strategies)
     preface = [
         f"信号日：{day.isoformat()}（使用该日收盘数据，委托目标是之后的第一个交易日开盘）。",
-        "候选来自首板次日承接和均线回踩。有模型时按模型分数保留前几名。",
+        f"候选来自{names}。",
         regime,
         _sentiment_line(info),
         model_line,
@@ -302,11 +330,14 @@ def _sentiment_line(info) -> str:
     )
 
 
-def _write_market_snapshot(report_dir: Path, day: date, info, model_ready: bool) -> None:
+def _write_market_snapshot(
+    report_dir: Path, day: date, info, model_ready: bool, use_ranker: bool
+) -> None:
     if info is None:
         return
     payload = market_day_payload(day, info)
     payload["model_ready"] = model_ready
+    payload["use_ranker"] = use_ranker
     payload["entry_note"] = "允许开新仓" if info.risk_on else "今日不开新仓"
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "market_latest.json").write_text(

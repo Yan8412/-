@@ -515,14 +515,41 @@ def _pack(score: float, reason: str, params: dict) -> Signal:
     )
 
 
+def _registry() -> dict[str, type[Strategy]]:
+    return {
+        "first_board_follow": FirstBoardFollow,
+        "breakout_60": Breakout60,
+        "ma_pullback": MaPullback,
+        "macd_golden": MacdGolden,
+        "shrink_reversal": ShrinkReversal,
+    }
+
+
+def parse_strategy_ids(value: object) -> list[str]:
+    """Accept a list of ids or a comma-separated string. Empty and unknown ids fail."""
+    if isinstance(value, str):
+        ids = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(value, list):
+        ids = [str(part).strip() for part in value if str(part).strip()]
+    else:
+        raise ValueError("strategies 必须是字符串列表，或逗号分隔的字符串")
+    if not ids:
+        raise ValueError("strategies 不能为空")
+    known = _registry()
+    unknown = [item for item in ids if item not in known]
+    if unknown:
+        raise ValueError(f"未知策略 {', '.join(unknown)}。可选：{', '.join(known)}")
+    return ids
+
+
+def strategies_from_ids(ids: list[str]) -> list[Strategy]:
+    parsed = parse_strategy_ids(ids)
+    known = _registry()
+    return [known[item]() for item in parsed]
+
+
 def builtin_strategies() -> list[Strategy]:
-    return [
-        FirstBoardFollow(),
-        Breakout60(),
-        MaPullback(),
-        MacdGolden(),
-        ShrinkReversal(),
-    ]
+    return strategies_from_ids(list(_registry()))
 
 
 def core_strategies() -> list[Strategy]:
@@ -530,4 +557,4 @@ def core_strategies() -> list[Strategy]:
 
     The other three strategies stay available for the original backtest.
     """
-    return [FirstBoardFollow(), MaPullback()]
+    return strategies_from_ids(["first_board_follow", "ma_pullback"])
