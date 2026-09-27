@@ -20,7 +20,7 @@ import pandas as pd
 from flask import Flask, abort, redirect, render_template, request, send_file, url_for
 from werkzeug.serving import make_server
 
-from laliga.backtest import walk_forward
+from laliga.backtest import iter_model_keys, model_label, walk_forward
 from laliga.config import DEFAULT_SEASONS, ModelConfig, api_token
 from laliga.data.client import SportMonksError, open_client
 from laliga.data.fetch import fetch_historical, fetch_window
@@ -200,7 +200,13 @@ def _register(app: Flask) -> None:
     @app.get("/backtest")
     def backtest_page():
         payload = _read_json(store().predictions_dir / "backtest.json")
-        return render_template("backtest.html", report=payload, rows=_metric_rows(payload) if payload else [])
+        comparison = None if demo() else _load_comparison(store().predictions_dir / "model_comparison.json")
+        return render_template(
+            "backtest.html",
+            report=payload,
+            rows=_metric_rows(payload) if payload else [],
+            comparison=_comparison_view(comparison) if comparison else None,
+        )
 
     @app.get("/data")
     def data_page():
@@ -526,6 +532,107 @@ def _backtest_csv(payload: dict) -> str:
     for label, model_value, baseline_value, _direction in _metric_rows(payload):
         writer.writerow([label, model_value, baseline_value])
     return buffer.getvalue()
+
+
+def _load_comparison(path: Path) -> dict | None:
+    """Return a comparison file only when it is a real computed report."""
+
+    payload = _read_json(path)
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("schema_version") != 1 or payload.get("computed_from_stored_matches") is not True:
+        return None
+    models = payload.get("models")
+    if not isinstance(models, dict):
+        return None
+    for key in ("dixon_coles", "baseline", "xgboost"):
+        block = models.get(key)
+        if not isinstance(block, dict):
+            return None
+        try:
+            if int(block["n"]) < 1:
+                return None
+            float(block["ft_log_loss"])
+            float(block["ft_brier"])
+            float(block["ft_accuracy"])
+        except (KeyError, TypeError, ValueError):
+            return None
+    return payload
+
+
+def _comparison_view(payload: dict) -> dict:
+    history_source = str(payload.get("history_source") or "sportmonks")
+    blend = payload.get("blend") if isinstance(payload.get("blend"), dict) else None
+    labels = tuple((key, model_label(key, history_source, blend)) for key in iter_model_keys(payload.get("models") or {}))
+    outcome_labels = {"home": "主胜", "draw": "平", "away": "客胜"}
+
+    def num(value, digits: int, percent: bool = False) -> str:
+        if value is None:
+            return "—"
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return "—"
+        if number != number:
+            return "—"
+        if percent:
+            return f"{number * 100:.1f}%"
+        return f"{number:.{digits}f}"
+
+    rows = []
+    for key, label in labels:
+        block = (payload.get("models") or {}).get(key)
+        if not isinstance(block, dict):
+            continue
+        rows.append(
+            {
+                "label": label,
+                "ft_log_loss": num(block.get("ft_log_loss"), 4),
+                "ft_brier": num(block.get("ft_brier"), 4),
+                "ft_rps": num(block.get("ft_rps"), 4),
+                "ft_accuracy": num(block.get("ft_accuracy"), 1, True),
+                "ht_log_loss": num(block.get("ht_log_loss"), 4),
+                "n": block.get("n"),
+            }
+        )
+    calibration = []
+    for key, label in labels:
+        summary = (payload.get("calibration") or {}).get(key) or {}
+        for item in summary.get("per_class") or []:
+            calibration.append(
+                {
+                    "model": label,
+                    "outcome": outcome_labels.get(item.get("outcome"), item.get("outcome")),
+                    "predicted": num(item.get("mean_predicted"), 4),
+                    "observed": num(item.get("observed_frequency"), 4),
+                }
+            )
+    paired = []
+    for item in payload.get("paired") or []:
+        paired.append(
+            {
+                "label": item.get("label") or "",
+                "difference": num(item.get("mean_logloss_difference"), 4),
+                "low": num(item.get("ci_low"), 4),
+                "high": num(item.get("ci_high"), 4),
+                "rps": num(item.get("mean_rps_difference"), 4),
+                "rps_low": num(item.get("rps_ci_low"), 4),
+                "rps_high": num(item.get("rps_ci_high"), 4),
+                "n": item.get("n"),
+            }
+        )
+    coverage = payload.get("odds_coverage")
+    return {
+        "rows": rows,
+        "calibration": calibration,
+        "paired": paired,
+        "notes": [str(note) for note in payload.get("notes") or []],
+        "n": payload["models"]["dixon_coles"]["n"],
+        "first": payload.get("first_test_day") or "",
+        "last": payload.get("last_test_day") or "",
+        "folds": payload.get("n_folds"),
+        "odds_coverage": None if coverage is None else num(coverage, 1, True),
+    }
 
 
 def _metric_rows(payload: dict | None) -> list[tuple[str, str, str, str]]:

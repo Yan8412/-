@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from laliga.data.parse import fixtures_to_frame, parse_fixture
 
@@ -137,6 +138,69 @@ def test_sides_can_be_inferred_from_score_participant_ids():
     assert row["home_team_id"] == 5
     assert row["away_team_name"] == "Visitor"
     assert row["status"] == "scheduled"
+
+
+def test_prematch_xg_and_odds_are_stored_and_inplay_is_ignored():
+    fixture = {
+        "id": 16,
+        "league_id": 564,
+        "season_id": 1,
+        "state_id": 5,
+        "starting_at": "2024-03-01 20:00:00",
+        "state": {"developer_name": "FT"},
+        "participants": [_participant(1, "Home", "home"), _participant(2, "Away", "away")],
+        "scores": [
+            _score("2ND_HALF", 1, "home", 1, 2),
+            _score("2ND_HALF", 2, "away", 0, 2),
+        ],
+        "xgfixture": [
+            {"type_id": 5304, "location": "home", "participant_id": 1, "data": {"value": 1.5}},
+            {"type_id": 5304, "location": "away", "participant_id": 2, "data": {"value": 0.4}},
+            {"type_id": 5305, "location": "home", "participant_id": 1, "data": {"value": 9.0}},
+        ],
+        "odds": [
+            {"market_id": 12, "bookmaker_id": 1, "label": "Home", "value": "1.2"},
+            {"market_id": 12, "bookmaker_id": 1, "label": "Away", "value": "4.0"},
+            {"market_id": 1, "bookmaker_id": 5, "label": "Home", "value": "2.0"},
+            {"market_id": 1, "bookmaker_id": 5, "label": "Draw", "value": "3.2"},
+            {"market_id": 1, "bookmaker_id": 5, "label": "Away", "value": "4.1"},
+            {"market_id": 1, "bookmaker_id": 2, "label": "1", "value": "1.8"},
+            {"market_id": 1, "bookmaker_id": 2, "label": "X", "value": "3.5"},
+            {"market_id": 1, "bookmaker_id": 2, "label": "2", "value": "4.4"},
+        ],
+        "inplayOdds": [
+            {"market_id": 1, "bookmaker_id": 2, "label": "Home", "value": "9.9"},
+            {"market_id": 1, "bookmaker_id": 2, "label": "Draw", "value": "9.9"},
+            {"market_id": 1, "bookmaker_id": 2, "label": "Away", "value": "9.9"},
+        ],
+        "premiumOdds": [
+            {"market_id": 1, "bookmaker_id": 9, "label": "Home", "value": "1.05", "latest_bookmaker_update": "2024-03-01 21:00:00"},
+            {"market_id": 1, "bookmaker_id": 9, "label": "Draw", "value": "1.05", "latest_bookmaker_update": "2024-03-01 21:00:00"},
+            {"market_id": 1, "bookmaker_id": 9, "label": "Away", "value": "1.05", "latest_bookmaker_update": "2024-03-01 21:00:00"},
+        ],
+    }
+    row = parse_fixture(fixture)
+    assert row["home_xg"] == 1.5
+    assert row["away_xg"] == 0.4
+    assert row["home_xga"] == 0.4
+    assert row["away_xga"] == 1.5
+    home_raw = ((1 / 1.8) + (1 / 2.0)) / 2
+    draw_raw = ((1 / 3.5) + (1 / 3.2)) / 2
+    away_raw = ((1 / 4.4) + (1 / 4.1)) / 2
+    total = home_raw + draw_raw + away_raw
+    assert row["implied_home"] == pytest.approx(home_raw / total)
+    assert row["implied_draw"] == pytest.approx(draw_raw / total)
+    assert row["implied_away"] == pytest.approx(away_raw / total)
+    assert row["odds_home"] == pytest.approx(total / home_raw)
+    assert row["odds_home"] != pytest.approx(1.8)
+    assert row["raw_implied_home"] == pytest.approx(home_raw)
+    assert row["raw_implied_draw"] == pytest.approx(draw_raw)
+    assert row["raw_implied_away"] == pytest.approx(away_raw)
+    assert home_raw + draw_raw + away_raw > 1
+    assert abs(row["implied_home"] + row["implied_draw"] + row["implied_away"] - 1) < 1e-12
+    frame = fixtures_to_frame([fixture])
+    assert frame.loc[0, "home_xg"] == 1.5
+    assert list(frame.columns).index("odds_away") > list(frame.columns).index("status")
 
 
 def test_frame_timestamps_are_utc():

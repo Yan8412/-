@@ -2,7 +2,10 @@
 
 Log loss is the mean negative natural log of the probability on the actual
 outcome. The multiclass Brier score is the mean, over matches, of the sum of
-squared errors across the three outcomes (range 0 to 2). Accuracy is how
+squared errors across the three outcomes (range 0 to 2). Ranked probability
+score treats home, draw, and away as ordered: it is the mean, over matches,
+of the sum of squared errors of the two cumulative probabilities, divided by
+2 so a perfect forecast scores 0 and the worst scores 1. Accuracy is how
 often the highest-probability outcome matches the result. The top-3 hit rate
 is how often the actual full-time score is one of the three predicted
 scorelines.
@@ -27,6 +30,8 @@ class MetricBlock:
     ht_brier: float | None
     ht_accuracy: float | None
     top3_hit_rate: float
+    ft_rps: float = float("nan")
+    ht_rps: float | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -34,9 +39,11 @@ class MetricBlock:
             "n_ht": self.n_ht,
             "ft_log_loss": self.ft_log_loss,
             "ft_brier": self.ft_brier,
+            "ft_rps": self.ft_rps,
             "ft_accuracy": self.ft_accuracy,
             "ht_log_loss": self.ht_log_loss,
             "ht_brier": self.ht_brier,
+            "ht_rps": self.ht_rps,
             "ht_accuracy": self.ht_accuracy,
             "top3_hit_rate": self.top3_hit_rate,
         }
@@ -50,11 +57,108 @@ def outcome_index(home_goals: int, away_goals: int) -> int:
     return 2
 
 
-def multiclass_log_loss(y: np.ndarray, probabilities: np.ndarray) -> float:
+def per_match_log_loss(y: np.ndarray, probabilities: np.ndarray) -> np.ndarray:
+    """Negative log probability of the actual outcome, one value per match."""
+
     clipped = np.clip(probabilities, 1e-15, 1.0)
     clipped = clipped / clipped.sum(axis=1, keepdims=True)
     chosen = clipped[np.arange(len(y)), y]
-    return float(-np.mean(np.log(chosen)))
+    return -np.log(chosen)
+
+
+def multiclass_log_loss(y: np.ndarray, probabilities: np.ndarray) -> float:
+    return float(np.mean(per_match_log_loss(y, probabilities)))
+
+
+def per_match_rps(y: np.ndarray, probabilities: np.ndarray) -> np.ndarray:
+    """Ranked probability score with home, draw, away in that order.
+
+    Lower is better. Dividing by ``r - 1`` (here 2) puts the score in ``[0, 1]``.
+    """
+
+    clipped = np.clip(probabilities, 1e-15, 1.0)
+    clipped = clipped / clipped.sum(axis=1, keepdims=True)
+    observed = np.zeros_like(clipped)
+    observed[np.arange(len(y)), y] = 1.0
+    cdf_gap = np.cumsum(clipped, axis=1)[:, :-1] - np.cumsum(observed, axis=1)[:, :-1]
+    return np.sum(cdf_gap**2, axis=1) / (clipped.shape[1] - 1)
+
+
+def multiclass_rps(y: np.ndarray, probabilities: np.ndarray) -> float:
+    return float(np.mean(per_match_rps(y, probabilities)))
+
+
+def paired_logloss_difference(
+    y: np.ndarray,
+    challenger: np.ndarray,
+    reference: np.ndarray,
+    *,
+    n_bootstrap: int = 1000,
+    seed: int = 7,
+) -> dict:
+    """Mean of per-match log loss(challenger) − log loss(reference).
+
+    A negative mean means the challenger assigned higher probability to the
+    actual outcomes. The interval is the 2.5 and 97.5 percentiles of that
+    mean over bootstrap resamples of the same matches.
+    """
+
+    diff = per_match_log_loss(y, challenger) - per_match_log_loss(y, reference)
+    rps_diff = per_match_rps(y, challenger) - per_match_rps(y, reference)
+    rng = np.random.default_rng(seed)
+    draws = rng.integers(0, len(diff), size=(n_bootstrap, len(diff)))
+    means = diff[draws].mean(axis=1)
+    rps_means = rps_diff[draws].mean(axis=1)
+    low, high = np.quantile(means, [0.025, 0.975])
+    rps_low, rps_high = np.quantile(rps_means, [0.025, 0.975])
+    return {
+        "mean_logloss_difference": float(diff.mean()),
+        "ci_low": float(low),
+        "ci_high": float(high),
+        "mean_rps_difference": float(rps_diff.mean()),
+        "rps_ci_low": float(rps_low),
+        "rps_ci_high": float(rps_high),
+        "n": int(len(diff)),
+        "n_bootstrap": int(n_bootstrap),
+        "seed": int(seed),
+    }
+
+
+def calibration_summary(y: np.ndarray, probabilities: np.ndarray, *, n_bins: int = 5) -> dict:
+    """Per-class mean probability against the observed rate, plus home-win bins."""
+
+    labels = ("home", "draw", "away")
+    per_class = []
+    for index, name in enumerate(labels):
+        per_class.append(
+            {
+                "outcome": name,
+                "mean_predicted": float(probabilities[:, index].mean()),
+                "observed_frequency": float(np.mean(y == index)),
+                "n": int(len(y)),
+            }
+        )
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    home = probabilities[:, 0]
+    bins = []
+    for start, end in zip(edges[:-1], edges[1:], strict=True):
+        if end == 1.0:
+            mask = (home >= start) & (home <= end)
+        else:
+            mask = (home >= start) & (home < end)
+        count = int(mask.sum())
+        if count == 0:
+            continue
+        bins.append(
+            {
+                "bin_low": float(start),
+                "bin_high": float(end),
+                "n": count,
+                "mean_predicted_home": float(home[mask].mean()),
+                "observed_home_frequency": float(np.mean(y[mask] == 0)),
+            }
+        )
+    return {"per_class": per_class, "home_probability_bins": bins}
 
 
 def multiclass_brier(y: np.ndarray, probabilities: np.ndarray) -> float:
@@ -81,17 +185,26 @@ def summarize_rows(rows: list[dict], prefix: str) -> MetricBlock:
         raise ValueError("没有可汇总的比赛。")
     y_ft = np.array([row["y_ft"] for row in rows], dtype=int)
     p_ft = np.array([row[f"{prefix}_ft_probs"] for row in rows], dtype=float)
-    ht_rows = [row for row in rows if row.get("y_ht") is not None]
+    ht_rows = [
+        row
+        for row in rows
+        if row.get("y_ht") is not None and row.get(f"{prefix}_ht_probs") is not None
+    ]
     if ht_rows:
         y_ht = np.array([row["y_ht"] for row in ht_rows], dtype=int)
         p_ht = np.array([row[f"{prefix}_ht_probs"] for row in ht_rows], dtype=float)
         ht_log_loss = multiclass_log_loss(y_ht, p_ht)
         ht_brier = multiclass_brier(y_ht, p_ht)
+        ht_rps = multiclass_rps(y_ht, p_ht)
         ht_accuracy = accuracy(y_ht, p_ht)
     else:
-        ht_log_loss = ht_brier = ht_accuracy = None
-    actual_scores = [row["score"] for row in rows]
-    predicted_scores = [row[f"{prefix}_top3"] for row in rows]
+        ht_log_loss = ht_brier = ht_accuracy = ht_rps = None
+    if rows and all(row.get(f"{prefix}_top3") is not None for row in rows):
+        actual_scores = [row["score"] for row in rows]
+        predicted_scores = [row[f"{prefix}_top3"] for row in rows]
+        top3 = top3_hit_rate(actual_scores, predicted_scores)
+    else:
+        top3 = float("nan")
     return MetricBlock(
         n=len(rows),
         n_ht=len(ht_rows),
@@ -101,7 +214,9 @@ def summarize_rows(rows: list[dict], prefix: str) -> MetricBlock:
         ht_log_loss=ht_log_loss,
         ht_brier=ht_brier,
         ht_accuracy=ht_accuracy,
-        top3_hit_rate=top3_hit_rate(actual_scores, predicted_scores),
+        top3_hit_rate=top3,
+        ft_rps=multiclass_rps(y_ft, p_ft),
+        ht_rps=ht_rps,
     )
 
 
@@ -113,11 +228,12 @@ def by_season(rows: list[dict], prefix: str) -> dict[str, MetricBlock]:
     return {key: summarize_rows(group, prefix) for key, group in sorted(groups.items()) if group}
 
 
-def iter_evaluation_folds(finished: pd.DataFrame, min_train_matches: int):
-    """Yield ``(day, train, test)`` with every training kickoff before the test day.
+def iter_calendar_days(finished: pd.DataFrame):
+    """Yield ``(day, train, test)`` for every UTC date that has a match.
 
-    All matches on the same UTC date are predicted together. None of them, and
-    nothing later, is in the training set.
+    Training kickoffs are strictly before that date. Every match on the date
+    is in the test block, including earlier kickoffs the same day, so a model
+    for that date cannot see a result Dixon–Coles would also have withheld.
     """
 
     if finished.empty:
@@ -127,8 +243,21 @@ def iter_evaluation_folds(finished: pd.DataFrame, min_train_matches: int):
     for day in ordered["match_day"].drop_duplicates().tolist():
         train = ordered[ordered["starting_at"] < day]
         test = ordered[ordered["match_day"] == day]
-        if len(train) < min_train_matches or test.empty:
+        if test.empty:
             continue
-        if train["starting_at"].max() >= test["starting_at"].min():
+        if len(train) and train["starting_at"].max() >= test["starting_at"].min():
             raise AssertionError("训练样本包含了测试日或更晚的比赛。")
+        yield day, train, test
+
+
+def iter_evaluation_folds(finished: pd.DataFrame, min_train_matches: int):
+    """Yield evaluation days whose training window has enough finished matches.
+
+    Same cut as ``iter_calendar_days``. Days before ``min_train_matches`` are
+    warmup: they are not scored.
+    """
+
+    for day, train, test in iter_calendar_days(finished):
+        if len(train) < min_train_matches:
+            continue
         yield day, train, test

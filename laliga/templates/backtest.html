@@ -31,4 +31,87 @@
   </div>
   {% endif %}
 </section>
+
+{% if comparison %}
+<section class="panel" id="model-comparison">
+  <h2>XGBoost 对照</h2>
+  <p class="muted">同一走步、同一批比赛：Dixon–Coles、历史频率基准、XGBoost。评测 {{ comparison.n }} 场，{{ comparison.first }} 至 {{ comparison.last }}，{{ comparison.folds }} 个评测日。预测用的模型仍是 Dixon–Coles。有赛前赔率且热身场次够了时，同一份文件里还有 Dixon–Coles 与去水位赔率的混合，场次是热身之后的那一批。这些数字来自本机 <code>python -m laliga compare</code> 写出的文件。</p>
+  {% if comparison.odds_coverage %}
+  <p class="muted">评测比赛里带完整赛前赔率的比例：{{ comparison.odds_coverage }}。</p>
+  {% endif %}
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>全场对数损失</th><th>全场 Brier</th><th>全场 RPS</th><th>全场命中率</th><th>半场对数损失</th><th>n</th></tr>
+      </thead>
+      <tbody>
+        {% for row in comparison.rows %}
+        <tr>
+          <td>{{ row.label }}</td>
+          <td>{{ row.ft_log_loss }}</td>
+          <td>{{ row.ft_brier }}</td>
+          <td>{{ row.ft_rps }}</td>
+          <td>{{ row.ft_accuracy }}</td>
+          <td>{{ row.ht_log_loss }}</td>
+          <td>{{ row.n }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if comparison.calibration %}
+  <h3>校准</h3>
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr><th>模型</th><th>结果</th><th>平均预测概率</th><th>实际频率</th></tr>
+      </thead>
+      <tbody>
+        {% for row in comparison.calibration %}
+        <tr>
+          <td>{{ row.model }}</td>
+          <td>{{ row.outcome }}</td>
+          <td>{{ row.predicted }}</td>
+          <td>{{ row.observed }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  {% if comparison.paired %}
+  <h3>配对比较</h3>
+  <p class="muted">每场全场对数损失之差和 RPS 之差的均值。负值表示减号前面的模型更好。区间是同一次 bootstrap 的 95% 分位。RPS 把主胜、平、客胜按这个顺序当作有序结果。</p>
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr><th>比较</th><th>对数损失之差</th><th>95% 区间低</th><th>95% 区间高</th><th>RPS 之差</th><th>RPS 区间低</th><th>RPS 区间高</th><th>n</th></tr>
+      </thead>
+      <tbody>
+        {% for row in comparison.paired %}
+        <tr>
+          <td>{{ row.label }}</td>
+          <td>{{ row.difference }}</td>
+          <td>{{ row.low }}</td>
+          <td>{{ row.high }}</td>
+          <td>{{ row.rps }}</td>
+          <td>{{ row.rps_low }}</td>
+          <td>{{ row.rps_high }}</td>
+          <td>{{ row.n }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  {% for note in comparison.notes %}
+  <p class="muted">{{ note }}</p>
+  {% endfor %}
+</section>
+{% elif not demo %}
+<section class="panel">
+  <h2>XGBoost 对照</h2>
+  <p class="muted">Dixon–Coles 仍是预测模型。「运行回测」不会训练 XGBoost，也不会下载赔率或 xG。回填用 <code>python -m laliga fetch-markets</code>，然后在已下载的本地数据上运行 <code>python -m laliga compare --min-train 320 --output data/predictions/model_comparison.json</code>。没有这个结果文件时，这里不显示数字。</p>
+</section>
+{% endif %}
 {% endblock %}
