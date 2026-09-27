@@ -9,6 +9,15 @@ from pathlib import Path
 
 from ashare.paths import default_config_path
 
+# Confirmed on the user's network, then the next hosts eltdx itself lists first.
+# Auto-probing those hosts times out on connect even when TCP 7709 is open.
+DEFAULT_TDX_HOSTS: tuple[str, ...] = (
+    "116.205.183.150:7709",
+    "116.205.171.132:7709",
+    "111.230.186.52:7709",
+    "119.97.185.59:7709",
+)
+
 
 @dataclass
 class Settings:
@@ -64,6 +73,8 @@ class Settings:
     # Environment variable that holds the Tonghuashun Financial-API key.
     # The value itself is never stored in this file.
     ths_api_key_env: str = "THS_API_KEY"
+    # Fixed Tongdaxin 7709 hosts, tried in order with probing disabled.
+    tdx_hosts: list[str] = field(default_factory=lambda: list(DEFAULT_TDX_HOSTS))
 
     def slot_budget(self, equity: float, cash: float) -> float:
         """Cash allocated to one new position, capped by the account rules."""
@@ -83,7 +94,7 @@ def load_settings(path: Path | None = None) -> Settings:
         raise ValueError("config.json 必须是对象")
     known = {item.name for item in fields(settings)}
     data = asdict(settings)
-    special = {"stamp_duty_change", "strategies", "use_ranker"}
+    special = {"stamp_duty_change", "strategies", "use_ranker", "tdx_hosts"}
     for key, value in payload.items():
         if key not in known or key in special:
             continue
@@ -99,4 +110,12 @@ def load_settings(path: Path | None = None) -> Settings:
         if not isinstance(value, bool):
             raise ValueError("use_ranker 必须是 JSON 布尔值 true 或 false")
         data["use_ranker"] = value
+    if "tdx_hosts" in payload:
+        data["tdx_hosts"] = _parse_tdx_hosts(payload["tdx_hosts"])
     return Settings(**data)
+
+
+def _parse_tdx_hosts(value: object) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError("tdx_hosts 必须是 host:port 字符串列表")
+    return [item.strip() for item in value if item.strip()]

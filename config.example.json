@@ -22,5 +22,11 @@
   "ml_pool": 80,
   "strategies": ["first_board_follow", "ma_pullback"],
   "use_ranker": false,
-  "ths_api_key_env": "THS_API_KEY"
+  "ths_api_key_env": "THS_API_KEY",
+  "tdx_hosts": [
+    "116.205.183.150:7709",
+    "116.205.171.132:7709",
+    "111.230.186.52:7709",
+    "119.97.185.59:7709"
+  ]
 }

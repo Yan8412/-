@@ -68,6 +68,15 @@ def build_parser() -> argparse.ArgumentParser:
     settle.add_argument("--ledger", type=Path, default=None)
     settle.add_argument("--cache-dir", type=Path, default=None)
 
+    st_sync = sub.add_parser("st-sync", help="只更新逐日 ST 和停牌，不碰模拟盘")
+    st_sync.add_argument("--cache-dir", type=Path, default=None)
+    st_sync.add_argument(
+        "--backfill-cap",
+        type=int,
+        default=40,
+        help="没有历史文件或缺口超过 20 天时，这次最多逐只回补多少只。0 表示只做全市场按日快照",
+    )
+
     dashboard = sub.add_parser("dashboard", help="打开本地中文看盘页面")
     dashboard.add_argument("--port", type=int, default=8501)
     dashboard.add_argument("--report-dir", type=Path, default=None)
@@ -147,6 +156,16 @@ def main(argv: list[str] | None = None) -> int:
             print(line)
         return 0
 
+    if args.command == "st-sync":
+        summary = _run_st_sync(today, cache_dir(args.cache_dir), args.backfill_cap)
+        print(
+            "逐日 ST："
+            f"已是最新 {summary['fresh']}，短缺口 {summary['tail']}，"
+            f"快照 {summary['bulk_days']} 天，逐只回补 {summary['backfill']}，"
+            f"待回补 {summary['pending']}，失败 {summary['failed']}。"
+        )
+        return 0
+
     if args.command == "dashboard":
         config = Path(args.config).expanduser().resolve() if args.config else default_config_path()
         return _launch_dashboard(
@@ -159,6 +178,18 @@ def main(argv: list[str] | None = None) -> int:
 
     parser.error("未知命令")
     return 2
+
+
+def _run_st_sync(today: date, cache: Path, backfill_cap: int) -> dict[str, int]:
+    """Refresh ST history for the download universe. Does not read or write the ledger."""
+    from ashare.data.sources import MarketData
+    from ashare.data.st_history import sync_st_history
+    from ashare.data.universe import load_catalog, select_for_download
+
+    source = MarketData(cache)
+    catalog, _notes = load_catalog(cache, today, source)
+    chosen, _stats = select_for_download(catalog, today)
+    return sync_st_history(cache, [item.code for item in chosen], today, backfill_cap=backfill_cap)
 
 
 def apply_daily_overrides(settings: Settings, args: argparse.Namespace) -> None:

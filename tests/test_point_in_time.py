@@ -2,13 +2,16 @@
 
 import json
 import sys
+import time
 from datetime import date, datetime
 
+import pytest
 import requests
 
-from ashare.data.intraday import annotate_rows, derive_seal
+from ashare.cli import build_parser
+from ashare.data.intraday import annotate_rows, connect_tdx, derive_seal
 from ashare.data.limit_pool import snapshot_limit_pools
-from ashare.data.st_history import apply_trading_status, load_status, sync_st_history
+from ashare.data.st_history import _store, apply_trading_status, load_status, sync_st_history
 from ashare.filters import rejection_reason
 from ashare.market_calendar import SHANGHAI
 from ashare.rules.limits import limit_prices
@@ -150,6 +153,158 @@ def test_rejected_code_does_not_drop_the_rest_of_the_batch(tmp_path, monkeypatch
     again = sync_st_history(tmp_path, ["920000", "600000"], date(2026, 9, 24), now=now)
     assert again["fresh"] == 2
     assert logins["n"] == 1
+
+
+def test_daily_gap_uses_one_market_snapshot_not_one_query_per_stock(tmp_path, monkeypatch):
+    _store(
+        tmp_path,
+        "600000",
+        [{"date": "2026-09-24", "is_st": False, "trading": True}],
+        empty_last=date(2026, 9, 24),
+    )
+    _store(
+        tmp_path,
+        "000001",
+        [{"date": "2026-09-24", "is_st": False, "trading": True}],
+        empty_last=date(2026, 9, 24),
+    )
+    history: list[str] = []
+    snapshots: list[str] = []
+
+    class _Login:
+        error_code = "0"
+        error_msg = "success"
+
+    class _History:
+        error_code = "0"
+        fields = ["date", "code", "isST", "tradestatus"]
+
+        def __init__(self) -> None:
+            self._rows = [["2026-09-28", "sz.300001", "0", "1"]]
+            self._index = 0
+
+        def next(self) -> bool:
+            if self._index >= len(self._rows):
+                return False
+            self._current = self._rows[self._index]
+            self._index += 1
+            return True
+
+        def get_row_data(self) -> list[str]:
+            return self._current
+
+    class _Snapshot:
+        error_code = "0"
+        fields = ["code", "tradeStatus", "code_name"]
+
+        def __init__(self, day: str) -> None:
+            snapshots.append(day)
+            self._rows = [
+                ["sh.600000", "1", "浦发银行"],
+                ["sz.000001", "0", "S*ST平安"],
+                ["sh.000001", "1", "上证指数"],
+            ]
+            self._index = 0
+
+        def next(self) -> bool:
+            if self._index >= len(self._rows):
+                return False
+            self._current = self._rows[self._index]
+            self._index += 1
+            return True
+
+        def get_row_data(self) -> list[str]:
+            return self._current
+
+    class _Baostock:
+        def login(self):
+            return _Login()
+
+        def logout(self):
+            return _Login()
+
+        def query_history_k_data_plus(self, code, fields, start_date, end_date, frequency, adjustflag):
+            del fields, start_date, end_date, frequency, adjustflag
+            history.append(code)
+            return _History()
+
+        def query_all_stock(self, day=None):
+            return _Snapshot(day)
+
+    monkeypatch.setitem(sys.modules, "baostock", _Baostock())
+    now = datetime(2026, 9, 28, 16, 0, tzinfo=SHANGHAI)
+    summary = sync_st_history(
+        tmp_path,
+        ["600000", "000001", "300001"],
+        date(2026, 9, 28),
+        now=now,
+        backfill_cap=1,
+    )
+    assert snapshots == ["2026-09-28"]
+    assert history == ["sz.300001"]
+    assert summary["bulk_days"] == 1
+    assert summary["backfill"] == 1
+    plain = load_status(tmp_path, "600000")
+    assert plain is not None
+    assert plain[date(2026, 9, 24)] == (False, True)
+    assert plain[date(2026, 9, 28)] == (False, True)
+    flagged = load_status(tmp_path, "000001")
+    assert flagged is not None
+    assert flagged[date(2026, 9, 28)] == (True, False)
+    again = sync_st_history(
+        tmp_path,
+        ["600000", "000001", "300001"],
+        date(2026, 9, 28),
+        now=now,
+        backfill_cap=1,
+    )
+    assert snapshots == ["2026-09-28"]
+    assert history == ["sz.300001"]
+    assert again["bulk_days"] == 0
+    assert again["backfill"] == 0
+
+
+def test_tdx_uses_fixed_hosts_then_auto_selection():
+    calls: list[dict] = []
+
+    class _Client:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        def __enter__(self):
+            if self.kwargs.get("host") == "bad:7709":
+                raise TimeoutError("7709 response timed out during connect")
+            return self
+
+    def factory(**kwargs):
+        calls.append(kwargs)
+        return _Client(**kwargs)
+
+    client = connect_tdx(["bad:7709", "116.205.183.150:7709"], time.monotonic() + 30, factory)
+    assert isinstance(client, _Client)
+    assert calls[0] == {
+        "host": "bad:7709",
+        "probe_hosts": False,
+        "server_count": 1,
+        "timeout": 5.0,
+    }
+    assert calls[1]["host"] == "116.205.183.150:7709"
+    assert calls[1]["probe_hosts"] is False
+    assert len(calls) == 2
+
+    calls.clear()
+    connect_tdx(["bad:7709"], time.monotonic() + 30, factory)
+    assert "host" not in calls[-1]
+    assert calls[-1]["timeout"] == 5.0
+
+    with pytest.raises(TimeoutError):
+        connect_tdx(["116.205.183.150:7709"], time.monotonic() - 1, factory)
+
+
+def test_st_sync_command_does_not_need_a_ledger():
+    args = build_parser().parse_args(["st-sync", "--backfill-cap", "0"])
+    assert args.command == "st-sync"
+    assert args.backfill_cap == 0
 
 
 def test_derive_seal_counts_breaks_and_a_reclose():

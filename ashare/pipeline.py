@@ -99,8 +99,11 @@ def _load_full_market(
     codes = [item.code for item in chosen]
     st_summary = sync_st_history(cache_dir, codes, today)
     notes.append(
-        "逐日 ST 与停牌来自 Baostock 的 isST、tradestatus，按当天判断，不用今天的名称。"
-        f"这次缓存已是最新 {st_summary['fresh']} 只，更新 {st_summary['updated']} 只，失败 {st_summary['failed']} 只。"
+        "逐日 ST 与停牌：已有文件的短缺口用 Baostock query_all_stock 按天补（名称里的 ST 和 tradeStatus），"
+        "没有文件或缺口很大才逐只查 isST。按当天判断，不用今天的名称。"
+        f"这次已是最新 {st_summary['fresh']} 只，短缺口 {st_summary.get('tail', 0)} 只，"
+        f"全市场快照 {st_summary.get('bulk_days', 0)} 天，逐只回补 {st_summary.get('backfill', 0)} 只，"
+        f"失败 {st_summary['failed']} 只。"
         "没有逐日记录的股票不按当前名称整段排除。主板 ST 当日涨跌停按 5%，创业板和科创板仍是 20%，北交所仍是 30%。"
     )
     symbols: list[SymbolSeries] = []
@@ -223,7 +226,7 @@ def run_daily(
     attach_inferred_st(symbols)
     panel = build_market_panel(symbols, settings)
     day = latest_common_day(symbols)
-    _fetch_optional_intraday(cache_dir, symbols, day)
+    _fetch_optional_intraday(cache_dir, symbols, day, settings)
     path = publish_daily(symbols, panel, settings, day, report_dir, paper_path, notes, cache_dir)
     _snapshot_optional_pools(cache_dir, report_dir, day, settings)
     return path
@@ -469,11 +472,11 @@ def run_research(
     return path
 
 
-def _fetch_optional_intraday(cache_dir: Path, symbols: list[SymbolSeries], day: date) -> None:
+def _fetch_optional_intraday(cache_dir: Path, symbols: list[SymbolSeries], day: date, settings: Settings) -> None:
     try:
         from ashare.data.intraday import fetch_intraday
 
-        fetch_intraday(cache_dir, symbols, day)
+        fetch_intraday(cache_dir, symbols, day, hosts=list(settings.tdx_hosts))
     except Exception as exc:  # noqa: BLE001
         logger.warning("分时封板特征跳过：%s", exc)
 

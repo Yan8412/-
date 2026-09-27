@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from ashare.config import DEFAULT_TDX_HOSTS
 from ashare.data.tables import read_records, write_records
 from ashare.market import SymbolSeries
 from ashare.rules.limits import classify_board, normalize_code
@@ -21,6 +23,9 @@ logger = logging.getLogger(__name__)
 MINUTE_COUNT = 240
 NEAR_LIMIT = 0.98
 MAX_NAMES = 200
+# The whole optional step, including connects. Daily must not wait longer.
+INTRADAY_BUDGET_SECONDS = 180
+CONNECT_TIMEOUT = 5.0
 
 
 def intraday_path(cache_dir: Path, day: date) -> Path:
@@ -94,7 +99,13 @@ def near_limit_codes(symbols: list[SymbolSeries], day: date) -> list[tuple[str, 
     return found
 
 
-def fetch_intraday(cache_dir: Path, symbols: list[SymbolSeries], day: date) -> list[dict]:
+def fetch_intraday(
+    cache_dir: Path,
+    symbols: list[SymbolSeries],
+    day: date,
+    hosts: list[str] | None = None,
+    budget_seconds: float = INTRADAY_BUDGET_SECONDS,
+) -> list[dict]:
     """Store seal and 09:25 auction fields for the limit-up neighborhood. Optional."""
     targets = near_limit_codes(symbols, day)
     if not targets:
@@ -104,22 +115,75 @@ def fetch_intraday(cache_dir: Path, symbols: list[SymbolSeries], day: date) -> l
     except ImportError:
         logger.warning("未安装 eltdx，跳过首封时间和炸板次数。")
         return load_intraday(cache_dir, day)
+    deadline = time.monotonic() + budget_seconds
     records: list[dict] = []
     try:
-        with TdxClient(timeout=5) as client:
-            depth = measure_history_depth(client, day)
+        client = connect_tdx(hosts if hosts is not None else list(DEFAULT_TDX_HOSTS), deadline, TdxClient)
+        try:
+            depth = measure_history_depth(client, day, deadline=deadline)
             _write_depth(cache_dir, depth)
             for code, limit in targets:
+                if time.monotonic() >= deadline:
+                    logger.warning("分时请求超过 %.0f 秒，已停止。", budget_seconds)
+                    break
                 try:
                     records.append(_one(client, code, day, limit))
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("eltdx %s %s 失败：%s", code, day.isoformat(), exc)
+        finally:
+            _close_client(client)
     except Exception as exc:  # noqa: BLE001
         logger.warning("eltdx 连接失败，跳过分时：%s", exc)
         return load_intraday(cache_dir, day)
     if records:
         write_records(intraday_path(cache_dir, day), records)
     return records
+
+
+def connect_tdx(hosts: list[str], deadline: float, factory):
+    """Try fixed hosts with probing off, then one auto-selection attempt.
+
+    ``factory`` is ``TdxClient`` or a test double. Fixed hosts use
+    ``probe_hosts=False`` and ``server_count=1``.
+    """
+    for host in hosts:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("分时连接超过时间上限")
+        client = None
+        try:
+            client = factory(host=host, probe_hosts=False, server_count=1, timeout=CONNECT_TIMEOUT)
+            _enter(client)
+            logger.info("eltdx 已连接 %s", host)
+            return client
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("eltdx %s 连接失败：%s", host, exc)
+            if client is not None:
+                _close_client(client)
+    if time.monotonic() >= deadline:
+        raise TimeoutError("分时连接超过时间上限")
+    logger.warning("固定通达信服务器都失败，改用自动选站。")
+    client = factory(timeout=CONNECT_TIMEOUT)
+    _enter(client)
+    return client
+
+
+def _enter(client) -> None:
+    enter = getattr(client, "__enter__", None)
+    if callable(enter):
+        enter()
+
+
+def _close_client(client) -> None:
+    try:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+            return
+        exit_ = getattr(client, "__exit__", None)
+        if callable(exit_):
+            exit_(None, None, None)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("eltdx 关闭连接失败：%s", exc)
 
 
 def load_intraday(cache_dir: Path, day: date) -> list[dict]:
@@ -149,12 +213,14 @@ def annotate_rows(rows: list[dict], records: list[dict]) -> None:
             row["reason"] = f"{row.get('reason', '')} {_fact_text(row)}".strip()
 
 
-def measure_history_depth(client, day: date, code: str = "sh600000") -> dict:
+def measure_history_depth(client, day: date, code: str = "sh600000", deadline: float | None = None) -> dict:
     """Walk backward until a history call comes back empty. Best effort."""
     oldest: str | None = None
     checked = 0
     cursor = day
     for _ in range(30):
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         if cursor.weekday() >= 5:
             cursor -= timedelta(days=1)
             continue
