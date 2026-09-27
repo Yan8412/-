@@ -35,7 +35,11 @@ def load_universe(settings: Settings, today: date, cache_dir: Path) -> tuple[lis
     )
     symbols: list[SymbolSeries] = []
     notes = list(source.notes)
-    notes.append("主行情源为腾讯日线（不复权，含除权信息）；失败时改用新浪日线。未使用东财接口。")
+    notes.append(
+        "主行情源为腾讯日线（不复权，含除权信息）；单只失败时改用新浪日线。"
+        "2026-09-27 探测东财 push2his 得到空响应，本次运行没有访问东财。"
+        "通达信公开行情端口按 2026-09 的公开记录已不可用，未接入。"
+    )
     for code, name in candidates:
         if len(symbols) >= settings.universe_size:
             break

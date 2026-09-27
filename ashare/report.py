@@ -106,17 +106,18 @@ def render_backtest_report(
             "",
             "每个测试段开始前，只用它之前的训练窗口在小网格里选参数，然后参数冻结，只交易后面的测试段。",
             "训练窗口看不到该测试段的价格。指标用因果复权，后来的分红不会改写更早的信号。",
+            "尾部凑不满一个测试窗口的交易日不会进入样本外曲线。",
             "",
             metrics_header(),
         ]
     )
     if not oos_results:
         lines.append("| （样本太短，无法切出训练/测试窗口） | | | | | | | | |")
+    for result, _folds in oos_results:
+        lines.append(metrics_row(f"{result.strategy_name}（{result.start} ~ {result.end}）", summarize(result)))
     for result, folds in oos_results:
-        lines.append(metrics_row(result.strategy_name, summarize(result)))
         if not folds:
-            lines.append("")
-            lines.append(f"{result.strategy_name} 没有形成有效的走步窗口。")
+            lines.extend(["", f"{result.strategy_name} 没有形成有效的走步窗口。"])
             continue
         lines.extend(["", f"### {result.strategy_name} 的参数选择", ""])
         lines.append("| 测试区间 | 训练目标值 | 最大持有天数 | 其他关键参数 | 训练期笔数 |")
