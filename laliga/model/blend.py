@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from laliga.model.devig import DEVIG_METHODS
 from laliga.model.metrics import multiclass_log_loss
 
 MIN_BLEND_HISTORY = 60
@@ -121,20 +122,28 @@ def walk_forward_blends(rows: list[dict], *, min_history: int = MIN_BLEND_HISTOR
     linear_path: list[dict] = []
     log_path: list[dict] = []
     stack_path: list[dict] = []
+    devig_path: list[dict] = []
     for day, day_rows in days:
         if len(history) >= min_history:
+            method = _choose_devig(history)
+            market_key = _devig_prob_key(method)
+            if any(row.get(market_key) is None for row in day_rows):
+                method = "proportional"
+                market_key = "market_ft_probs"
             y_hist = np.array([item["y_ft"] for item in history], dtype=int)
             dc_hist = _matrix(history, "dixon_coles_ft_probs")
-            market_hist = _matrix(history, "market_ft_probs")
+            market_hist = _matrix(history, market_key)
             linear_weight = fit_pool_weight(y_hist, dc_hist, market_hist, linear_pool)
             log_weight = fit_pool_weight(y_hist, dc_hist, market_hist, log_pool)
             stack_a, stack_b = fit_stack(y_hist, dc_hist, market_hist)
             dc_day = _matrix(day_rows, "dixon_coles_ft_probs")
-            market_day = _matrix(day_rows, "market_ft_probs")
+            market_day = _matrix(day_rows, market_key)
             linear = linear_pool(dc_day, market_day, linear_weight)
             logarithmic = log_pool(dc_day, market_day, log_weight)
             stacked = stack_pool(dc_day, market_day, stack_a, stack_b)
             for index, row in enumerate(day_rows):
+                row["blend_market_ft_probs"] = _as_tuple(market_day[index])
+                row["blend_devig_method"] = method
                 row["blend_linear_ft_probs"] = _as_tuple(linear[index])
                 row["blend_log_ft_probs"] = _as_tuple(logarithmic[index])
                 row["blend_stack_ft_probs"] = _as_tuple(stacked[index])
@@ -146,6 +155,7 @@ def walk_forward_blends(rows: list[dict], *, min_history: int = MIN_BLEND_HISTOR
             linear_path.append({"day": day, "n_history": len(history), "weight": linear_weight})
             log_path.append({"day": day, "n_history": len(history), "weight": log_weight})
             stack_path.append({"day": day, "n_history": len(history), "a": stack_a, "b": stack_b})
+            devig_path.append({"day": day, "n_history": len(history), "method": method})
         history.extend(day_rows)
 
     if not scored:
@@ -158,7 +168,8 @@ def walk_forward_blends(rows: list[dict], *, min_history: int = MIN_BLEND_HISTOR
 
     y_scored = np.array([row["y_ft"] for row in scored], dtype=int)
     dc_scored = _matrix(scored, "dixon_coles_ft_probs")
-    market_scored = _matrix(scored, "market_ft_probs")
+    # The oracle refits the pool weight only. It does not pick another de-vig method.
+    market_scored = _matrix(scored, "blend_market_ft_probs")
     oracle_linear = fit_pool_weight(y_scored, dc_scored, market_scored, linear_pool)
     oracle_log = fit_pool_weight(y_scored, dc_scored, market_scored, log_pool)
     oracle_a, oracle_b = fit_stack(y_scored, dc_scored, market_scored)
@@ -169,6 +180,7 @@ def walk_forward_blends(rows: list[dict], *, min_history: int = MIN_BLEND_HISTOR
         "warmup_n": len(chosen) - len(scored),
         "scored_n": len(scored),
         "weight_fit": "walk_forward_previous_evaluation_days_only",
+        "devig": _devig_summary(devig_path),
         "linear": {
             "formula": "w*dixon_coles + (1-w)*market",
             "weight_on_dixon_coles": _path_summary(linear_path, "weight"),
@@ -235,14 +247,74 @@ def blend_notes(description: dict) -> list[str]:
             f"b：起点 {_fmt(stack_b['start'])}，中位数 {_fmt(stack_b['median'])}，终点 {_fmt(stack_b['end'])}。"
             "a 和 b 的中位数分开计算，不一定是同一天的一对。"
         ),
+        _devig_note(description.get("devig")),
         (
             "事后最优固定权重只作样本内上界，不是走步结果，不能用来判断混合有没有打败赔率。"
-            f"它只在计分的 {description['scored_n']} 场上拟合和评估，热身场次不参与。"
+            f"它只在计分的 {description['scored_n']} 场上重拟合混合权重，不重新选择去水位方法，热身场次不参与。"
             f"线性 w={_fmt(oracle_linear['weight_on_dixon_coles'])}（对数损失 {_fmt(oracle_linear['ft_log_loss'])}），"
             f"对数 w={_fmt(oracle_log['weight_on_dixon_coles'])}（对数损失 {_fmt(oracle_log['ft_log_loss'])}），"
             f"叠加 a={_fmt(oracle_stack['a'])}、b={_fmt(oracle_stack['b'])}（对数损失 {_fmt(oracle_stack['ft_log_loss'])}）。"
         ),
     ]
+
+
+def _choose_devig(rows: list[dict]) -> str:
+    """Pick the de-vig method with the lowest log loss on ``rows``.
+
+    Proportional is first in ``DEVIG_METHODS``. A later method replaces it
+    only when its log loss is lower by more than the tie tolerance. A method
+    that is missing on any of these rows is not eligible, so the choice cannot
+    use a price that appears only on the day being scored.
+    """
+
+    y = np.array([row["y_ft"] for row in rows], dtype=int)
+    best = "proportional"
+    best_loss = multiclass_log_loss(y, _matrix(rows, "market_ft_probs"))
+    for method in DEVIG_METHODS:
+        if method == "proportional":
+            continue
+        key = _devig_prob_key(method)
+        if any(row.get(key) is None for row in rows):
+            continue
+        loss = multiclass_log_loss(y, _matrix(rows, key))
+        if loss < best_loss - _LOSS_TIE:
+            best_loss = loss
+            best = method
+    return best
+
+
+def _devig_prob_key(method: str) -> str:
+    if method == "proportional":
+        return "market_ft_probs"
+    return f"market_{method}_ft_probs"
+
+
+def _devig_summary(path: list[dict]) -> dict:
+    counts: dict[str, int] = {}
+    for item in path:
+        counts[item["method"]] = counts.get(item["method"], 0) + 1
+    return {
+        "selection": "walk_forward_previous_evaluation_days_only",
+        "tie_break": "proportional",
+        "oracle_repeats_walk_forward_method": True,
+        "closing_odds_excluded": True,
+        "start": path[0]["method"],
+        "end": path[-1]["method"],
+        "counts": counts,
+        "path": path,
+    }
+
+
+def _devig_note(devig: dict | None) -> str:
+    if not devig:
+        return "去水位方法没有单独走步选择，混合用的是比例去水位。"
+    counts = "、".join(f"{name} {count} 天" for name, count in sorted(devig["counts"].items()))
+    return (
+        "混合用的赔率方法也按更早评测日的对数损失走步选择，当天和以后的结果不参与。"
+        f"打平时留在比例去水位。起点 {devig['start']}，终点 {devig['end']}（{counts}）。"
+        "事后最优权重只在已经选定的方法上重拟合混合系数，不会在计分比赛上改选 Shin 或幂。"
+        "收盘赔率不进入混合。"
+    )
 
 
 def _unavailable(eligible_n: int, min_history: int, reason: str) -> dict:

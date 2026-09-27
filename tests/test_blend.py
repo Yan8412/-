@@ -132,6 +132,75 @@ def test_oracle_weight_is_fit_on_scored_matches_only_and_labelled():
     assert "hindsight_upper_bound" in json.dumps(description)
 
 
+def test_devig_method_ignores_same_day_and_future_results():
+    proportional = (0.55, 0.25, 0.20)
+    power = (0.70, 0.18, 0.12)
+    rows: list[dict] = []
+    next_id = 1
+    for offset in range(40):
+        rows.append(
+            {
+                "fixture_id": next_id + offset,
+                "match_day": "2024-05-01",
+                "y_ft": 0,
+                "dixon_coles_ft_probs": proportional,
+                "market_ft_probs": proportional,
+                "market_power_ft_probs": power,
+            }
+        )
+    next_id = 41
+    for offset in range(40):
+        rows.append(
+            {
+                "fixture_id": next_id + offset,
+                "match_day": "2024-05-02",
+                "y_ft": 2,
+                "dixon_coles_ft_probs": proportional,
+                "market_ft_probs": proportional,
+                "market_power_ft_probs": power,
+            }
+        )
+    description = walk_forward_blends(rows, min_history=40)
+    today = [row for row in rows if row["match_day"] == "2024-05-02"]
+    assert {row["blend_devig_method"] for row in today} == {"power"}
+    assert description["devig"]["path"][0]["method"] == "power"
+    assert description["devig"]["oracle_repeats_walk_forward_method"] is True
+    assert description["linear"]["oracle"]["weight_on_dixon_coles"] == 1.0
+    assert all(row["market_ft_probs"] == proportional for row in today)
+    assert np.allclose(_matrix_key(today, "blend_market_ft_probs"), np.array([power] * 40))
+
+    leaked = [dict(row) for row in rows]
+    for row in leaked:
+        if row["match_day"] == "2024-05-02":
+            row["y_ft"] = 0
+    future = [dict(row) for row in rows]
+    future.append(
+        {
+            "fixture_id": 900,
+            "match_day": "2024-05-03",
+            "y_ft": 0,
+            "dixon_coles_ft_probs": proportional,
+            "market_ft_probs": proportional,
+            "market_power_ft_probs": power,
+        }
+    )
+    walk_forward_blends(leaked, min_history=40)
+    walk_forward_blends(future, min_history=40)
+    assert {row["blend_devig_method"] for row in leaked if row["match_day"] == "2024-05-02"} == {"power"}
+    assert np.allclose(
+        _matrix_key([row for row in rows if row["match_day"] == "2024-05-02"], "blend_linear_ft_probs"),
+        _matrix_key([row for row in leaked if row["match_day"] == "2024-05-02"], "blend_linear_ft_probs"),
+    )
+    assert np.allclose(
+        _matrix_key([row for row in rows if row["match_day"] == "2024-05-02"], "blend_linear_ft_probs"),
+        _matrix_key([row for row in future if row["match_day"] == "2024-05-02"], "blend_linear_ft_probs"),
+    )
+
+
+def _matrix_key(rows: list[dict], key: str) -> np.ndarray:
+    return np.array([row[key] for row in rows], dtype=float)
+
+
 def test_short_history_scores_nothing():
     rows: list[dict] = []
     _add(rows, "2024-03-01", 30, 0, DC_HOME, MARKET_HOME, 1)

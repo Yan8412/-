@@ -68,6 +68,9 @@ OPTIONAL_FLOAT_COLUMNS = [
     "implied_home",
     "implied_draw",
     "implied_away",
+    "raw_implied_home",
+    "raw_implied_draw",
+    "raw_implied_away",
 ]
 
 _XG_TYPE_ID = 5304
@@ -187,6 +190,9 @@ def parse_fixture(fixture: dict[str, Any]) -> dict[str, Any] | None:
         "implied_home": prices["implied_home"],
         "implied_draw": prices["implied_draw"],
         "implied_away": prices["implied_away"],
+        "raw_implied_home": prices["raw_implied_home"],
+        "raw_implied_draw": prices["raw_implied_draw"],
+        "raw_implied_away": prices["raw_implied_away"],
     }
 
 
@@ -303,7 +309,9 @@ def aggregate_prematch_1x2(rows: list[dict[str, Any]], *, kickoff: Any = None) -
     Bookmakers missing any side are dropped. The three outcomes are the mean
     of ``1/decimal`` across the remaining books, divided by their sum.
     Stored decimals are the reciprocal of those probabilities, so they match
-    the de-vigged prices rather than any single raw book.
+    the de-vigged prices rather than any single raw book. ``raw_implied_*``
+    keeps the average of ``1/decimal`` before that division, which Shin and
+    power need. A price that was already normalised cannot be un-devigged.
     """
 
     empty = {
@@ -313,6 +321,9 @@ def aggregate_prematch_1x2(rows: list[dict[str, Any]], *, kickoff: Any = None) -
         "implied_home": None,
         "implied_draw": None,
         "implied_away": None,
+        "raw_implied_home": None,
+        "raw_implied_draw": None,
+        "raw_implied_away": None,
     }
     kickoff_at = _as_utc(kickoff)
     chosen: dict[tuple[int, str], tuple[pd.Timestamp | None, float]] = {}
@@ -353,6 +364,9 @@ def aggregate_prematch_1x2(rows: list[dict[str, Any]], *, kickoff: Any = None) -
         "implied_home": implied[0],
         "implied_draw": implied[1],
         "implied_away": implied[2],
+        "raw_implied_home": raw[0],
+        "raw_implied_draw": raw[1],
+        "raw_implied_away": raw[2],
     }
 
 

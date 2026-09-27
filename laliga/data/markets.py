@@ -10,8 +10,10 @@ This module is the one-off (and later incremental) pass:
   at or after kickoff are dropped, then the remaining bookmakers are
   averaged and de-vigged.
 
-A second run only asks for rows that are still missing odds, or finished
-rows still missing xG. HTTP 403 stops that feed and leaves a message
+A second run asks again for rows that are still missing odds, for finished
+rows that have a de-vigged price but no ``raw_implied_*`` (Shin and power
+need the overround), or for finished rows still missing xG. HTTP 403 stops
+that feed and leaves a message
 instead of a traceback. Raw responses go through the same cache as
 ``fetch``.
 """
@@ -119,6 +121,8 @@ def format_market_fetch(result: MarketFetchResult) -> str:
         f"完场且主客 xG 都有：{result.xg_complete} 场（本次计划请求 {result.xg_requested} 场）。",
         "赔率来自赛前 include=odds、filters=markets:1（全场胜平负）。",
         "每家博彩只用开赛前最后一条报价；多家取隐含概率平均后再去掉水位。不请求 inplayOdds。",
+        "raw_implied_* 是去水位之前的平均 1/小数赔率。Shin 和幂去水位要用它。"
+        "只有去水位概率、没有 raw_implied_* 的完场比赛会再请求一次。",
         "xG 是 xGFixture 的 type 5304。home_xga 是客队 xG，away_xga 是主队 xG。",
         "本场 xG 只留给以后的比赛做滚动均值，不会当成这场的特征。",
         "每日 fetch 和操作台「更新数据」不会跑这一步。补新比赛后再执行本命令即可，已有数值的行会跳过。",
@@ -249,7 +253,7 @@ def _wants_odds(row, force: bool, misses: set[int]) -> bool:
         return False
     if force or _field(row, "status") == "scheduled":
         return True
-    if _row_has_odds(row):
+    if _row_has_odds(row) and _row_has_raw_implied(row):
         return False
     return int(_field(row, "fixture_id")) not in misses
 
@@ -266,6 +270,22 @@ def _row_has_odds(row) -> bool:
     series = row if isinstance(row, pd.Series) else pd.Series(row._asdict())
     implied = odds_features(series)
     return all(math.isfinite(implied[name]) for name in ODDS_FEATURES)
+
+
+def _row_has_raw_implied(row) -> bool:
+    """True when the pre-normalisation 1X2 average is stored on all three sides."""
+
+    for side in ("home", "draw", "away"):
+        value = _field(row, f"raw_implied_{side}")
+        try:
+            if value is None or pd.isna(value):
+                return False
+            number = float(value)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(number) or number <= 0.0 or number >= 1.0:
+            return False
+    return True
 
 
 def _row_has_xg(row) -> bool:

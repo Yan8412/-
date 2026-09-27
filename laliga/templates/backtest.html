@@ -42,7 +42,7 @@
   <div class="wrap">
     <table>
       <thead>
-        <tr><th>模型</th><th>全场对数损失</th><th>全场 Brier</th><th>全场命中率</th><th>半场对数损失</th><th>n</th></tr>
+        <tr><th>模型</th><th>全场对数损失</th><th>全场 Brier</th><th>全场 RPS</th><th>全场命中率</th><th>半场对数损失</th><th>n</th></tr>
       </thead>
       <tbody>
         {% for row in comparison.rows %}
@@ -50,6 +50,7 @@
           <td>{{ row.label }}</td>
           <td>{{ row.ft_log_loss }}</td>
           <td>{{ row.ft_brier }}</td>
+          <td>{{ row.ft_rps }}</td>
           <td>{{ row.ft_accuracy }}</td>
           <td>{{ row.ht_log_loss }}</td>
           <td>{{ row.n }}</td>
@@ -80,11 +81,11 @@
   {% endif %}
   {% if comparison.paired %}
   <h3>配对比较</h3>
-  <p class="muted">每场全场对数损失之差的均值。负值表示减号前面的模型更好。区间是 bootstrap 的 95% 分位。</p>
+  <p class="muted">每场全场对数损失之差和 RPS 之差的均值。负值表示减号前面的模型更好。区间是同一次 bootstrap 的 95% 分位。RPS 把主胜、平、客胜按这个顺序当作有序结果。</p>
   <div class="wrap">
     <table>
       <thead>
-        <tr><th>比较</th><th>对数损失之差</th><th>95% 区间低</th><th>95% 区间高</th><th>n</th></tr>
+        <tr><th>比较</th><th>对数损失之差</th><th>95% 区间低</th><th>95% 区间高</th><th>RPS 之差</th><th>RPS 区间低</th><th>RPS 区间高</th><th>n</th></tr>
       </thead>
       <tbody>
         {% for row in comparison.paired %}
@@ -93,6 +94,9 @@
           <td>{{ row.difference }}</td>
           <td>{{ row.low }}</td>
           <td>{{ row.high }}</td>
+          <td>{{ row.rps }}</td>
+          <td>{{ row.rps_low }}</td>
+          <td>{{ row.rps_high }}</td>
           <td>{{ row.n }}</td>
         </tr>
         {% endfor %}

@@ -230,6 +230,55 @@ def test_backfill_paginates_prematch_odds_caches_without_the_token_and_skips_fil
     assert misses == []
 
 
+def test_finished_row_with_odds_but_no_raw_implied_is_requested_again(tmp_path):
+    store = MatchStore(tmp_path)
+    store.replace(
+        pd.DataFrame(
+            [
+                _row(
+                    1,
+                    "finished",
+                    "2024-09-01 20:00:00+00:00",
+                    odds_home=2.0,
+                    odds_draw=3.4,
+                    odds_away=4.0,
+                    implied_home=0.48,
+                    implied_draw=0.28,
+                    implied_away=0.24,
+                )
+            ]
+        )
+    )
+    calls = []
+
+    def transport(url, params):
+        calls.append(params.get("include"))
+        return 200, {}, {
+            "data": [
+                {
+                    "id": 1,
+                    "odds": [
+                        _quote(4, "Home", "1.90", "2024-09-01 12:00:00"),
+                        _quote(4, "Draw", "3.40", "2024-09-01 12:00:00"),
+                        _quote(4, "Away", "4.20", "2024-09-01 12:00:00"),
+                    ],
+                }
+            ],
+            "pagination": {"has_more": False},
+        }
+
+    first = fetch_stored_markets(_client(tmp_path, transport), store)
+    assert first.odds_requested == 1
+    assert "odds" in calls
+    loaded = store.load().set_index("fixture_id")
+    assert loaded.loc[1, "raw_implied_home"] > 0
+    assert loaded.loc[1, ["raw_implied_home", "raw_implied_draw", "raw_implied_away"]].sum() > 1
+    calls.clear()
+    second = fetch_stored_markets(_client(tmp_path, transport), store)
+    assert second.odds_requested == 0
+    assert calls == []
+
+
 def test_permission_errors_are_messages_and_do_not_wipe_the_other_feed(tmp_path):
     store = MatchStore(tmp_path)
     store.replace(

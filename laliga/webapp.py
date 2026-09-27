@@ -20,7 +20,7 @@ import pandas as pd
 from flask import Flask, abort, redirect, render_template, request, send_file, url_for
 from werkzeug.serving import make_server
 
-from laliga.backtest import COMPARISON_TABLE_KEYS, MODEL_LABELS, walk_forward
+from laliga.backtest import iter_model_keys, model_label, walk_forward
 from laliga.config import DEFAULT_SEASONS, ModelConfig, api_token
 from laliga.data.client import SportMonksError, open_client
 from laliga.data.fetch import fetch_historical, fetch_window
@@ -561,7 +561,9 @@ def _load_comparison(path: Path) -> dict | None:
 
 
 def _comparison_view(payload: dict) -> dict:
-    labels = tuple((key, MODEL_LABELS[key]) for key in COMPARISON_TABLE_KEYS)
+    history_source = str(payload.get("history_source") or "sportmonks")
+    blend = payload.get("blend") if isinstance(payload.get("blend"), dict) else None
+    labels = tuple((key, model_label(key, history_source, blend)) for key in iter_model_keys(payload.get("models") or {}))
     outcome_labels = {"home": "主胜", "draw": "平", "away": "客胜"}
 
     def num(value, digits: int, percent: bool = False) -> str:
@@ -587,6 +589,7 @@ def _comparison_view(payload: dict) -> dict:
                 "label": label,
                 "ft_log_loss": num(block.get("ft_log_loss"), 4),
                 "ft_brier": num(block.get("ft_brier"), 4),
+                "ft_rps": num(block.get("ft_rps"), 4),
                 "ft_accuracy": num(block.get("ft_accuracy"), 1, True),
                 "ht_log_loss": num(block.get("ht_log_loss"), 4),
                 "n": block.get("n"),
@@ -612,6 +615,9 @@ def _comparison_view(payload: dict) -> dict:
                 "difference": num(item.get("mean_logloss_difference"), 4),
                 "low": num(item.get("ci_low"), 4),
                 "high": num(item.get("ci_high"), 4),
+                "rps": num(item.get("mean_rps_difference"), 4),
+                "rps_low": num(item.get("rps_ci_low"), 4),
+                "rps_high": num(item.get("rps_ci_high"), 4),
                 "n": item.get("n"),
             }
         )

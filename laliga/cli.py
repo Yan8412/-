@@ -13,6 +13,7 @@ import pandas as pd
 
 from laliga.config import DEFAULT_MIN_TRAIN_MATCHES, DEFAULT_SEASONS, DEFAULT_XI, ModelConfig, api_token, project_data_dir
 from laliga.data.client import SportMonksError, open_client
+from laliga.data.football_data import HistoryError, format_history_build, import_history, load_history
 from laliga.data.fetch import fetch_historical, fetch_window
 from laliga.data.markets import fetch_stored_markets, format_market_fetch
 from laliga.data.parse import fixtures_to_frame
@@ -50,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     except CliError as exc:
         print(str(exc), file=sys.stderr)
         return exc.exit_code
-    except (SportMonksError, FitError) as exc:
+    except (SportMonksError, FitError, HistoryError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
 
@@ -85,6 +86,16 @@ def build_parser() -> argparse.ArgumentParser:
     markets.add_argument("--refresh", action="store_true", help="忽略本地缓存，并重新请求已经填过的比赛")
     markets.set_defaults(func=cmd_fetch_markets)
 
+    history = sub.add_parser(
+        "import-history",
+        help="从 football-data.co.uk 下载 2012/13 之后的西甲，写入 processed/history.csv（不进每日更新）",
+    )
+    _add_data_dir(history)
+    history.add_argument("--since", type=int, default=2012, help="从这个赛季的起始年下载，例如 2012")
+    history.add_argument("--until", type=int, default=None, help="下载到这个起始年，默认到今年")
+    history.add_argument("--refresh", action="store_true", help="忽略已缓存的 SP1 CSV，重新下载")
+    history.set_defaults(func=cmd_import_history)
+
     train = sub.add_parser("train", help="用全部完场比赛拟合模型并保存")
     _add_model_args(train)
     train.set_defaults(func=cmd_train)
@@ -115,9 +126,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=str,
         default="",
-        help="对照 JSON 的路径。默认写到数据目录的 predictions/model_comparison.json",
+        help="对照 JSON 的路径。SportMonks 默认 predictions/model_comparison.json，长历史默认 model_comparison_history.json",
     )
-    compare.set_defaults(func=cmd_compare)
+    compare.add_argument(
+        "--history",
+        choices=("sportmonks", "football-data"),
+        default="sportmonks",
+        help="sportmonks 读 matches.csv；football-data 读 import-history 写出的 history.csv",
+    )
+    compare.add_argument("--since", type=int, default=None, help="只评测这个起始年及以后的赛季，例如 2012")
+    compare.add_argument(
+        "--refit-every",
+        type=int,
+        default=0,
+        help="Dixon–Coles 每隔多少个 UTC 日重拟合。0 表示 SportMonks 每天、football-data 每 7 天",
+    )
+    boost = compare.add_mutually_exclusive_group()
+    boost.add_argument("--xgboost", dest="with_xgboost", action="store_const", const=True, help="训练 XGBoost 对照")
+    boost.add_argument("--no-xgboost", dest="with_xgboost", action="store_const", const=False, help="不训练 XGBoost")
+    compare.set_defaults(with_xgboost=None, func=cmd_compare)
 
     predict = sub.add_parser("predict", help="预测未开赛比赛")
     _add_model_args(predict)
@@ -175,6 +202,20 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_import_history(args: argparse.Namespace) -> int:
+    store = _store(args)
+    sport = store.load()
+    built = import_history(
+        store.root,
+        None if sport.empty else sport,
+        since=args.since,
+        until=args.until,
+        refresh=args.refresh,
+    )
+    print(format_history_build(built))
+    return 0
+
+
 def cmd_fetch_markets(args: argparse.Namespace) -> int:
     store = _store(args)
     if store.load().empty:
@@ -222,10 +263,30 @@ def cmd_compare(args: argparse.Namespace) -> int:
     from laliga.backtest import compare_models
 
     store = _store(args)
-    history = _require_history(store)
+    if args.history == "football-data":
+        history = load_history(store.root, since=args.since)
+    else:
+        history = _filter_since(_require_history(store), args.since)
+    refit_every = args.refit_every
+    if refit_every == 0:
+        refit_every = 7 if args.history == "football-data" else 1
+    if refit_every < 1:
+        raise CliError("--refit-every 至少是 1。0 表示按数据源使用默认间隔。")
+    with_xgboost = args.history != "football-data" if args.with_xgboost is None else args.with_xgboost
     config = _config(args, min_train=args.min_train)
-    report = compare_models(history, config)
-    output = Path(args.output) if args.output else store.predictions_dir / "model_comparison.json"
+    report = compare_models(
+        history,
+        config,
+        refit_every_days=refit_every,
+        with_xgboost=with_xgboost,
+        history_source=args.history,
+    )
+    if args.output:
+        output = Path(args.output)
+    elif args.history == "football-data":
+        output = store.predictions_dir / "model_comparison_history.json"
+    else:
+        output = store.predictions_dir / "model_comparison.json"
     _write_utf8(output, json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
     print(format_comparison(report))
     print(f"\n对照 JSON 已写入 {output}")
@@ -390,6 +451,20 @@ def _client(store: MatchStore, *, refresh: bool):
         return open_client(store.cache_dir, refresh=refresh)
     except SportMonksError as exc:
         raise CliError(str(exc), exit_code=2) from exc
+
+
+def _filter_since(frame: pd.DataFrame, since: int | None) -> pd.DataFrame:
+    if since is None or frame.empty:
+        return frame
+    if "season_start" in frame.columns and frame["season_start"].notna().any():
+        kept = frame[pd.to_numeric(frame["season_start"], errors="coerce") >= int(since)].copy()
+    else:
+        kickoff = pd.to_datetime(frame["starting_at"], utc=True).dt.tz_convert("Europe/Madrid")
+        start_year = kickoff.dt.year.where(kickoff.dt.month >= 7, kickoff.dt.year - 1)
+        kept = frame.loc[start_year >= int(since)].copy()
+    if kept.empty:
+        raise CliError(f"没有 {since} 年及以后开赛的赛季。")
+    return kept.reset_index(drop=True)
 
 
 def _config(args: argparse.Namespace, min_train: int) -> ModelConfig:
