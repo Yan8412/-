@@ -1,8 +1,8 @@
 {
   "trained_through": "2025-04-25",
   "params": {
-    "max_depth": 3,
-    "min_samples_leaf": 80,
+    "max_depth": 2,
+    "min_samples_leaf": 40,
     "learning_rate": 0.05,
     "n_estimators": 80
   },
@@ -10,51 +10,51 @@
   "importances": [
     {
       "feature": "log_limit_up_count",
-      "importance": 0.31671936779582904
-    },
-    {
-      "feature": "prev_limit_return",
-      "importance": 0.17744791471335475
+      "importance": 0.42872796361667914
     },
     {
       "feature": "broken_rate",
-      "importance": 0.15460491975895246
+      "importance": 0.15305951323433273
+    },
+    {
+      "feature": "prev_limit_return",
+      "importance": 0.1264095230699165
     },
     {
       "feature": "breadth",
-      "importance": 0.10648596181904794
+      "importance": 0.0998693303066595
     },
     {
       "feature": "index_vs_ma",
-      "importance": 0.09102874666610294
+      "importance": 0.08721683274750427
     },
     {
       "feature": "market_max_height",
-      "importance": 0.06059058061483414
+      "importance": 0.06810586834265585
     },
     {
       "feature": "log_amount",
-      "importance": 0.03209963821424535
+      "importance": 0.015191833877124035
     },
     {
       "feature": "swing20",
-      "importance": 0.020972117380826404
-    },
-    {
-      "feature": "dist_ma20",
-      "importance": 0.016999490369760426
+      "importance": 0.015047871111185603
     },
     {
       "feature": "rule_score",
-      "importance": 0.011734763916732798
-    },
-    {
-      "feature": "day_return",
-      "importance": 0.006871890896115046
+      "importance": 0.003466902938784167
     },
     {
       "feature": "vol_ratio",
-      "importance": 0.004444607854198702
+      "importance": 0.0029043607551581525
+    },
+    {
+      "feature": "day_return",
+      "importance": 0.0
+    },
+    {
+      "feature": "dist_ma20",
+      "importance": 0.0
     },
     {
       "feature": "close_pos",
