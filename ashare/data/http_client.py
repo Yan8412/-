@@ -24,15 +24,27 @@ class RateLimiter:
             self._next = time.monotonic() + self.min_interval
 
 
-def fetch_text(url: str, limiter: RateLimiter, timeout: float = 20.0) -> str:
+def fetch_text(
+    url: str,
+    limiter: RateLimiter,
+    timeout: float = 20.0,
+    headers: dict[str, str] | None = None,
+    encoding: str | None = None,
+    attempts: int = 3,
+) -> str:
     last_error: Exception | None = None
-    headers = {"User-Agent": "Mozilla/5.0 ashare-short/0.1 (research)"}
-    for attempt in range(3):
+    merged = {"User-Agent": "Mozilla/5.0 ashare-short/0.1 (research)"}
+    if headers:
+        merged.update(headers)
+    for attempt in range(max(1, attempts)):
         limiter.wait()
         try:
-            response = requests.get(url, headers=headers, timeout=timeout)
+            response = requests.get(url, headers=merged, timeout=timeout)
             response.raise_for_status()
-            response.encoding = response.encoding or "utf-8"
+            if encoding:
+                response.encoding = encoding
+            else:
+                response.encoding = response.encoding or "utf-8"
             return response.text
         except (requests.RequestException, OSError) as exc:
             last_error = exc

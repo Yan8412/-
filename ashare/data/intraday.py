@@ -1,5 +1,10 @@
 """Optional 1-minute seal stats from eltdx. Missing package or a dead host is a warning.
 
+Configured hosts are tried first, with probing off. If they all fail and eltdx
+exposes its packaged server list, the rest of that list is tried the same way
+until the overall budget runs out. Auto-selection is only the fallback when
+that list cannot be imported.
+
 History depth depends on whatever the TDX host still stores. Measure it on the
 machine that will run the book; a cloud probe is not that measurement.
 """
@@ -140,18 +145,55 @@ def fetch_intraday(
     return records
 
 
-def connect_tdx(hosts: list[str], deadline: float, factory):
-    """Try fixed hosts with probing off, then one auto-selection attempt.
+def known_tdx_hosts() -> list[str]:
+    """eltdx packaged 7709 list, then its built-in fallback. Empty if eltdx is absent."""
+    try:
+        from eltdx import hosts as host_module
+    except ImportError:
+        return []
+    packaged: list[str] = []
+    loader = getattr(host_module, "load_server_hosts", None)
+    if callable(loader):
+        try:
+            packaged = [str(item) for item in (loader() or [])]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("eltdx 服务器列表读取失败：%s", exc)
+    fallback = getattr(host_module, "FALLBACK_HOSTS", None) or getattr(host_module, "DEFAULT_HOSTS", ())
+    return _unique_hosts([*packaged, *fallback])
 
-    ``factory`` is ``TdxClient`` or a test double. Fixed hosts use
-    ``probe_hosts=False`` and ``server_count=1``.
+
+def connect_tdx(hosts: list[str], deadline: float, factory):
+    """Try configured hosts, then eltdx's known list, all with probing off.
+
+    ``factory`` is ``TdxClient`` or a test double. Each direct connect uses
+    ``probe_hosts=False`` and ``server_count=1``. The attempt stops when
+    ``deadline`` (the intraday budget) is reached. Auto-selection runs only
+    when eltdx did not expose a server list.
     """
-    for host in hosts:
-        if time.monotonic() >= deadline:
+    configured = _unique_hosts(hosts)
+    extras = [host for host in known_tdx_hosts() if host not in configured]
+    candidates = configured + extras
+    configured_set = set(configured)
+    announced = False
+    for host in candidates:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             raise TimeoutError("分时连接超过时间上限")
+        if host not in configured_set and not announced:
+            logger.info(
+                "配置的通达信服务器都失败，改试已知主站 %s 台（不测速），剩余 %.0f 秒",
+                len(extras),
+                remaining,
+            )
+            announced = True
         client = None
         try:
-            client = factory(host=host, probe_hosts=False, server_count=1, timeout=CONNECT_TIMEOUT)
+            client = factory(
+                host=host,
+                probe_hosts=False,
+                server_count=1,
+                timeout=min(CONNECT_TIMEOUT, remaining),
+            )
             _enter(client)
             logger.info("eltdx 已连接 %s", host)
             return client
@@ -159,12 +201,23 @@ def connect_tdx(hosts: list[str], deadline: float, factory):
             logger.warning("eltdx %s 连接失败：%s", host, exc)
             if client is not None:
                 _close_client(client)
+    if extras:
+        raise ConnectionError("eltdx 已知服务器都连接失败")
     if time.monotonic() >= deadline:
         raise TimeoutError("分时连接超过时间上限")
     logger.warning("固定通达信服务器都失败，改用自动选站。")
-    client = factory(timeout=CONNECT_TIMEOUT)
+    client = factory(timeout=min(CONNECT_TIMEOUT, deadline - time.monotonic()))
     _enter(client)
     return client
+
+
+def _unique_hosts(values: list[str]) -> list[str]:
+    hosts: list[str] = []
+    for value in values:
+        host = str(value).strip()
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
 
 
 def _enter(client) -> None:

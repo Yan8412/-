@@ -39,24 +39,45 @@ def save_bars(cache_dir: Path, code: str, bars: list[RawBar], source: str) -> No
     os.replace(temporary, path)
 
 
-def peek_cache(cache_dir: Path, code: str) -> tuple[int, date | None, str | None]:
-    """Length, last bar date, and fetch time without building ``RawBar`` objects."""
+def peek_cache(cache_dir: Path, code: str) -> tuple[int, date | None, str | None, float | None]:
+    """Length, last bar date, fetch time, and last close. No ``RawBar`` objects."""
     path = cache_path(cache_dir, code)
     if not path.exists():
-        return 0, None, None
+        return 0, None, None, None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return 0, None, None
+        return 0, None, None, None
     bars = payload.get("bars") or []
     fetched_at = payload.get("fetched_at")
     if not bars or not isinstance(bars[-1], dict):
-        return 0, None, fetched_at
+        return 0, None, fetched_at, None
+    last_bar = bars[-1]
     try:
-        last = date.fromisoformat(str(bars[-1].get("date"))[:10])
+        last = date.fromisoformat(str(last_bar.get("date"))[:10])
     except (TypeError, ValueError):
-        return len(bars), None, fetched_at
-    return len(bars), last, fetched_at
+        return len(bars), None, fetched_at, None
+    try:
+        close = float(last_bar.get("close"))
+    except (TypeError, ValueError):
+        close = None
+    return len(bars), last, fetched_at, close
+
+
+def append_bar(cache_dir: Path, code: str, bar: RawBar, source: str, previous: date) -> bool:
+    """Append one session when the file still ends on ``previous``.
+
+    Returns False when the cache moved or the new bar is not strictly later.
+    The rewrite is the same atomic replace as :func:`save_bars`.
+    """
+    bars, _fetched = load_bars(cache_dir, code)
+    if not bars or bars[-1].date != previous:
+        return False
+    if bar.date <= bars[-1].date:
+        return False
+    bars.append(bar)
+    save_bars(cache_dir, code, bars, source)
+    return True
 
 
 def cache_covers(

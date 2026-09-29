@@ -3,6 +3,10 @@
 Primary path is Tencent (does not use Eastmoney). Sina is the fallback for
 both the universe list and daily bars. Eastmoney push2his returned an empty
 reply when this project was built (2026-09), so it is not called.
+
+When the cache is exactly one completed session behind and that session is
+today (15:30 Asia/Shanghai), ``refresh_many`` appends the close from Sina and
+Tencent batch quotes instead of one kline request per name.
 """
 
 from __future__ import annotations
@@ -11,8 +15,21 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 
+from ashare.data.cache import append_bar, cache_covers, peek_cache
 from ashare.data.http_client import RateLimiter, fetch_json
+from ashare.data.spot import (
+    APPEND,
+    CORPORATE,
+    SUSPEND,
+    SpotFetch,
+    bar_from_spot,
+    bulk_close_available,
+    classify_spot,
+    fetch_spot_quotes,
+    is_one_session_behind,
+)
 from ashare.market import RawBar
+from ashare.market_calendar import previous_trading_day
 from ashare.rules.adjust import parse_corporate_action
 from ashare.rules.limits import classify_board, is_risk_name, normalize_code
 
@@ -58,6 +75,7 @@ class MarketData:
         self.tencent_limiter = RateLimiter(tencent_interval)
         self.sina_limiter = RateLimiter(sina_interval)
         self.notes: list[str] = []
+        self.refresh_note = ""
 
     def get_bars(self, code: str, count: int, today: date, now: datetime | None = None) -> list[RawBar]:
         from ashare.data.cache import cache_is_fresh, load_bars, merge_bars, save_bars
@@ -180,28 +198,73 @@ class MarketData:
     ) -> dict[str, str]:
         """Download stale names and drop the bars. Returns code to error message.
 
-        A fresh file is only peeked (length, last date, fetch time). Downloaded
-        bars are written and discarded, so a full-market pass does not keep
-        every history in memory at once.
+        A fresh file is only peeked (length, last date, fetch time, last close).
+        When the latest completed session is today and a file ends on the
+        previous session, that one bar comes from a batch quote. Every other
+        gap still uses the per-stock kline. Downloaded bars are written and
+        discarded, so a full-market pass does not keep every history in memory.
         """
-        from ashare.data.cache import cache_covers, peek_cache
-
         errors: dict[str, str] = {}
         pending: list[str] = []
+        one_behind: list[tuple[str, float]] = []
         fresh = 0
         minimum = min(count, 60)
+        allowed, session, shanghai_day = bulk_close_available(now)
+        previous = previous_trading_day(session) if allowed else None
         for code in codes:
             try:
                 symbol = normalize_code(code)
             except ValueError as exc:
                 errors[code] = str(exc)
                 continue
-            length, last, fetched_at = peek_cache(self.cache_dir, symbol)
+            length, last, fetched_at, last_close = peek_cache(self.cache_dir, symbol)
             if cache_covers(length, last, fetched_at, minimum, now=now):
                 fresh += 1
+                continue
+            if (
+                allowed
+                and previous is not None
+                and length >= minimum
+                and is_one_session_behind(last, session)
+                and last_close is not None
+                and last_close > 0
+            ):
+                one_behind.append((symbol, last_close))
             else:
                 pending.append(symbol)
-        logger.info("日线缓存命中 %s 只，待下载 %s 只", fresh, len(pending))
+
+        written = {"sina": 0, "tencent": 0, "akshare": 0}
+        suspended = 0
+        corporate = 0
+        missed = 0
+        if one_behind:
+            try:
+                fallback, suspended, corporate, missed = self._append_spot(one_behind, session, written)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("批量快照失败，这批改为逐只: %s", exc)
+                fallback = [code for code, _close in one_behind]
+                suspended = 0
+                corporate = 0
+                missed = len(fallback)
+                written.clear()
+                written.update({"sina": 0, "tencent": 0, "akshare": 0})
+            pending.extend(fallback)
+        else:
+            fallback = []
+        gap_count = len(pending) - len(fallback)
+        self.refresh_note = _refresh_note(
+            fresh,
+            written,
+            suspended,
+            corporate,
+            missed,
+            gap_count,
+            len(pending),
+            allowed,
+            session,
+            shanghai_day,
+        )
+        logger.info("%s", self.refresh_note)
         if not pending:
             return errors
 
@@ -221,6 +284,57 @@ class MarketData:
                 if done % 200 == 0 or done == len(pending):
                     logger.info("日线下载进度 %s/%s", done, len(pending))
         return errors
+
+    def _append_spot(
+        self,
+        one_behind: list[tuple[str, float]],
+        session: date,
+        written: dict[str, int],
+    ) -> tuple[list[str], int, int, int]:
+        """Append closes. Returns codes that still need a per-stock download."""
+        closes = {code: close for code, close in one_behind}
+        fetched: SpotFetch = fetch_spot_quotes(
+            list(closes),
+            self.sina_limiter,
+            self.tencent_limiter,
+            session,
+        )
+        fallback: list[str] = []
+        suspended = 0
+        corporate = 0
+        missed = 0
+        previous = previous_trading_day(session)
+        for code, cached_close in one_behind:
+            spot = fetched.quotes.get(code)
+            decision = classify_spot(spot, cached_close, session)
+            if decision == SUSPEND:
+                suspended += 1
+                continue
+            if decision == CORPORATE:
+                corporate += 1
+                fallback.append(code)
+                continue
+            if decision != APPEND or spot is None:
+                missed += 1
+                fallback.append(code)
+                continue
+            try:
+                saved = append_bar(
+                    self.cache_dir,
+                    code,
+                    bar_from_spot(spot, session),
+                    f"{spot.source}-spot",
+                    previous,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("批量快照写入 %s 失败: %s", code, exc)
+                saved = False
+            if saved:
+                written[spot.source] = written.get(spot.source, 0) + 1
+            else:
+                missed += 1
+                fallback.append(code)
+        return fallback, suspended, corporate, missed
 
     def fetch_many(
         self,
@@ -365,3 +479,36 @@ def _parse_tencent(payload: object, symbol: str) -> list[RawBar]:
         )
     bars.sort(key=lambda bar: bar.date)
     return bars
+
+
+def _refresh_note(
+    fresh: int,
+    written: dict[str, int],
+    suspended: int,
+    corporate: int,
+    missed: int,
+    gap_count: int,
+    per_stock: int,
+    allowed: bool,
+    session: date,
+    shanghai_day: date,
+) -> str:
+    """One line naming which path served how many names."""
+    if not allowed:
+        return (
+            f"日线路径：最近完成的交易日 {session.isoformat()} 不是上海今天 "
+            f"{shanghai_day.isoformat()}，收盘快照不能当作当天收盘，改为逐只。"
+            f"缓存已覆盖 {fresh} 只，逐只下载 {per_stock} 只。"
+        )
+    return (
+        f"日线路径：最近交易日 {session.isoformat()} 就是上海今天。"
+        f"缓存已覆盖 {fresh} 只，"
+        f"新浪快照写入 {written.get('sina', 0)} 只，"
+        f"腾讯快照写入 {written.get('tencent', 0)} 只，"
+        f"akshare 快照写入 {written.get('akshare', 0)} 只，"
+        f"停牌跳过 {suspended} 只，"
+        f"逐只下载 {per_stock} 只"
+        f"（缺口超过 1 个交易日 {gap_count} 只，"
+        f"除权或复权价不一致 {corporate} 只，"
+        f"快照没有可用收盘 {missed} 只）。"
+    )

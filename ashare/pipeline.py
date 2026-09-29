@@ -96,6 +96,8 @@ def _load_full_market(
         today,
         workers=4,
     )
+    if source.refresh_note:
+        notes.append(source.refresh_note)
     codes = [item.code for item in chosen]
     st_summary = sync_st_history(cache_dir, codes, today)
     notes.append(
@@ -149,6 +151,9 @@ def _load_full_market(
         raise RuntimeError("没有下载到任何可用日线，无法生成推荐或回测。")
     notes.append(
         "主行情源为腾讯日线（不复权，含除权信息）；单只失败时改用新浪日线。"
+        "缓存只缺今天这一根、并且上海时间已经过 15:30 时，用新浪和腾讯的批量收盘快照补上，不再逐只请求。"
+        "快照昨收和缓存最后收盘价对不上的（除权，或缓存是复权价）仍逐只下载，以便带上分红送转。"
+        "停牌不写空 K 线。盘中、周末和休市日仍走逐只。"
         "退市代码来自 Baostock 的上市/退市日期，日线仍向腾讯请求。"
         "2026-09-27 探测东财 push2his 得到空响应，本次运行没有访问东财。"
     )

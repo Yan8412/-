@@ -264,7 +264,8 @@ def test_daily_gap_uses_one_market_snapshot_not_one_query_per_stock(tmp_path, mo
     assert again["backfill"] == 0
 
 
-def test_tdx_uses_fixed_hosts_then_auto_selection():
+def test_tdx_uses_fixed_hosts_then_auto_selection(monkeypatch):
+    monkeypatch.setattr("ashare.data.intraday.known_tdx_hosts", lambda: [])
     calls: list[dict] = []
 
     class _Client:
@@ -299,6 +300,45 @@ def test_tdx_uses_fixed_hosts_then_auto_selection():
 
     with pytest.raises(TimeoutError):
         connect_tdx(["116.205.183.150:7709"], time.monotonic() - 1, factory)
+
+
+def test_tdx_rotates_known_hosts_and_stops_at_the_budget(monkeypatch):
+    monkeypatch.setattr(
+        "ashare.data.intraday.known_tdx_hosts",
+        lambda: ["cfg:7709", "a:7709", "b:7709", "c:7709"],
+    )
+    clock = {"now": 1_000.0}
+
+    def monotonic():
+        return clock["now"]
+
+    monkeypatch.setattr("ashare.data.intraday.time.monotonic", monotonic)
+    calls: list[str] = []
+
+    def factory(**kwargs):
+        assert "host" in kwargs
+        assert kwargs["probe_hosts"] is False
+        calls.append(kwargs["host"])
+        clock["now"] += 10
+        raise ConnectionError("closed")
+
+    with pytest.raises(TimeoutError):
+        connect_tdx(["cfg:7709"], 1_025.0, factory)
+    assert calls == ["cfg:7709", "a:7709", "b:7709"]
+
+
+def test_tdx_known_list_does_not_fall_back_to_auto_selection(monkeypatch):
+    monkeypatch.setattr("ashare.data.intraday.known_tdx_hosts", lambda: ["extra:7709", "cfg:7709"])
+    calls: list[dict] = []
+
+    def factory(**kwargs):
+        calls.append(kwargs)
+        raise ConnectionError("closed")
+
+    with pytest.raises(ConnectionError, match="已知服务器"):
+        connect_tdx(["cfg:7709"], time.monotonic() + 30, factory)
+    assert [item["host"] for item in calls] == ["cfg:7709", "extra:7709"]
+    assert all(item["probe_hosts"] is False for item in calls)
 
 
 def test_st_sync_command_does_not_need_a_ledger():
