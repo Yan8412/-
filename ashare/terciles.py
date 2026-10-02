@@ -274,3 +274,114 @@ def gated_entry_mask(
             continue
         allowed[day] = bucket != gate.drop_tercile
     return allowed
+
+
+@dataclass(frozen=True)
+class PromoGateDecision:
+    """Today's 1进2 low-tercile check. ``blocked`` is true only when the cut is known and today is low.
+
+    ``unavailable`` fails open: the caller must not block new entries.
+    """
+
+    state: str
+    blocked: bool
+    promo_1_2: float | None
+    cut: float | None
+    tercile: int | None
+    train_start: date | None
+    train_end: date | None
+    sample_size: int
+    warning: str | None
+
+
+def low_tercile_cut(sample: np.ndarray) -> float | None:
+    """Highest training value that ``assign_tercile`` still labels as the low tercile.
+
+    The query value is not added to the sample, same as a later signal day.
+    """
+    finite = np.asarray(sample, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size < MIN_TRAIN_DAYS:
+        return None
+    lows = [float(value) for value in np.unique(finite) if assign_tercile(float(value), finite) == 0]
+    if not lows:
+        return None
+    return max(lows)
+
+
+def evaluate_promo_gate(
+    panel: MarketPanel,
+    day: date,
+    train_days: int,
+    test_days: int,
+) -> PromoGateDecision:
+    """Point-in-time low tercile of ``promo_1_2``, using the study's walk-forward cut.
+
+    Sessions after ``day`` are dropped before the folds are built, so a later
+    close cannot move today's training window. The decision day's own rate is
+    not part of that window. A missing rate or a short window is ``unavailable``.
+    """
+    info = panel.days.get(day) if panel is not None else None
+    promo = None
+    if info is not None and math.isfinite(float(info.promo_1_2)):
+        promo = float(info.promo_1_2)
+    calendar = [item for item in (panel.calendar if panel is not None else []) if item <= day]
+    if not calendar or calendar[-1] != day:
+        return _promo_unavailable(promo, "信号日不在已缓存的交易日里，这次不拦截新开仓。")
+    if train_days <= 0 or test_days <= 0:
+        return _promo_unavailable(promo, "1进2闸门的训练窗或测试窗不是正数，这次不拦截新开仓。")
+    folds = iter_folds_with_tail(calendar, train_days, test_days)
+    fold = fold_covering(folds, day)
+    if fold is None or fold.train_end >= day:
+        return _promo_unavailable(promo, "交易日还不满一个训练窗，1进2低档切点算不出来，这次不拦截新开仓。")
+    walker = WalkForwardTerciles(panel, calendar, folds, features=("promo_1_2",))
+    sample = walker.sample(fold, "promo_1_2")
+    finite = sample[np.isfinite(sample)] if sample.size else sample
+    cut = low_tercile_cut(sample)
+    tercile = None if promo is None else assign_tercile(promo, sample)
+    if tercile is None:
+        if promo is None:
+            message = "今天的 1进2 晋级率缺失，这次不拦截新开仓。"
+        else:
+            message = "训练窗里晋级率有效的交易日不足，1进2低档切点算不出来，这次不拦截新开仓。"
+        return _promo_unavailable(
+            promo,
+            message,
+            cut=cut,
+            train_start=fold.train_start,
+            train_end=fold.train_end,
+            sample_size=int(finite.size),
+        )
+    blocked = tercile == 0
+    return PromoGateDecision(
+        state="closed" if blocked else "open",
+        blocked=blocked,
+        promo_1_2=promo,
+        cut=cut,
+        tercile=tercile,
+        train_start=fold.train_start,
+        train_end=fold.train_end,
+        sample_size=int(finite.size),
+        warning=None,
+    )
+
+
+def _promo_unavailable(
+    promo: float | None,
+    warning: str,
+    cut: float | None = None,
+    train_start: date | None = None,
+    train_end: date | None = None,
+    sample_size: int = 0,
+) -> PromoGateDecision:
+    return PromoGateDecision(
+        state="unavailable",
+        blocked=False,
+        promo_1_2=promo,
+        cut=cut,
+        tercile=None,
+        train_start=train_start,
+        train_end=train_end,
+        sample_size=sample_size,
+        warning=warning,
+    )

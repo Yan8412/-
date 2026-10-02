@@ -26,6 +26,7 @@ from ashare.data.universe import coverage_notes, load_catalog, select_for_downlo
 from ashare.market import SymbolSeries, build_symbol, mark_listing_censorship, master_calendar
 from ashare.ranker import load_ranker, score_candidate
 from ashare.sentiment import MarketPanel, attach_inferred_st, build_market_panel, market_day_payload
+from ashare.terciles import PromoGateDecision, evaluate_promo_gate
 from ashare.report import (
     render_backtest_report,
     write_equity_chart,
@@ -259,14 +260,15 @@ def publish_daily(
         annotate_rows(rows, load_intraday(cache_dir, day))
     info = panel.days.get(day)
     risk_on = bool(info.risk_on) if info is not None else False
-    preface = _daily_preface(settings, day, info, model, risk_on, notes, strategies)
+    gate = _promo_gate(panel, settings, day)
+    preface = _daily_preface(settings, day, info, model, risk_on, notes, strategies, gate)
     report_dir.mkdir(parents=True, exist_ok=True)
-    _write_market_snapshot(report_dir, day, info, model is not None, settings.use_ranker)
+    _write_market_snapshot(report_dir, day, info, model is not None, settings.use_ranker, gate, risk_on)
     markdown = report_dir / f"daily_{day.isoformat()}.md"
     csv_path = report_dir / f"daily_{day.isoformat()}.csv"
     write_recommendations_markdown(markdown, rows, preface)
     write_recommendations_csv(csv_path, rows)
-    if paper_path is not None and rows and risk_on:
+    if paper_path is not None and rows and risk_on and not gate.blocked:
         broker = PaperBroker(paper_path, settings)
         requests = [
             OrderRequest(
@@ -313,6 +315,66 @@ def _rank_rows(
     return rows[: settings.top_n]
 
 
+def _promo_gate(panel: MarketPanel, settings: Settings, day: date) -> PromoGateDecision:
+    """Paper-only 1进2 low tercile. Disabled and uncomputable gates do not block."""
+    if not settings.promo_gate_enabled:
+        return PromoGateDecision(
+            state="off",
+            blocked=False,
+            promo_1_2=None,
+            cut=None,
+            tercile=None,
+            train_start=None,
+            train_end=None,
+            sample_size=0,
+            warning=None,
+        )
+    try:
+        decision = evaluate_promo_gate(
+            panel,
+            day,
+            settings.promo_gate_train_days,
+            settings.promo_gate_test_days,
+        )
+    except Exception as exc:  # noqa: BLE001 - a broken cut must not freeze the daily book
+        logger.warning("1进2低档闸门计算失败，这次不拦截新开仓：%s", exc)
+        return PromoGateDecision(
+            state="unavailable",
+            blocked=False,
+            promo_1_2=None,
+            cut=None,
+            tercile=None,
+            train_start=None,
+            train_end=None,
+            sample_size=0,
+            warning=f"1进2低档闸门计算失败，这次不拦截新开仓：{exc}",
+        )
+    if decision.state == "unavailable" and decision.warning:
+        logger.warning("%s", decision.warning)
+    return decision
+
+
+def _gate_line(decision: PromoGateDecision) -> str:
+    if decision.state == "off":
+        return "1进2低档闸门未开启（promo_gate_enabled 为 false），不额外拦截模拟盘新开仓。"
+    promo = "无" if decision.promo_1_2 is None else f"{decision.promo_1_2 * 100:.1f}%"
+    cut = "无" if decision.cut is None else f"{decision.cut * 100:.1f}%"
+    window = ""
+    if decision.train_start is not None and decision.train_end is not None:
+        window = (
+            f"训练窗 {decision.train_start.isoformat()} 至 {decision.train_end.isoformat()}"
+            f"（{decision.sample_size} 个允许开仓且晋级率有效的交易日），"
+        )
+    if decision.state == "closed":
+        return (
+            f"1进2晋级率 {promo}，低档切点 {cut}，{window}闸门关闭。"
+            "今日不写入新的模拟盘委托。已有持仓仍按原规则卖出。"
+        )
+    if decision.state == "open":
+        return f"1进2晋级率 {promo}，低档切点 {cut}，{window}闸门开启，不拦截新开仓。"
+    return decision.warning or "1进2低档闸门无法计算，这次不拦截新开仓。"
+
+
 def _daily_preface(
     settings: Settings,
     day: date,
@@ -321,6 +383,7 @@ def _daily_preface(
     risk_on: bool,
     notes: list[str],
     strategies: list[Strategy],
+    gate: PromoGateDecision,
 ) -> list[str]:
     if risk_on:
         regime = "行情过滤：允许开新仓（站上 MA20 的股票不少于设定比例，且等权指数在均线之上）。"
@@ -338,6 +401,7 @@ def _daily_preface(
         f"候选来自{names}。",
         regime,
         _sentiment_line(info),
+        _gate_line(gate),
         model_line,
         f"资金按 {settings.initial_capital:.0f} 元、最多 {settings.max_positions} 只、单票不超过净值的 {settings.max_position_pct:.0%} 估算。",
         "买入区间是相对信号日收盘价的容许开盘价。开盘涨停、高开超出上限、低开超出下限都不会成交。",
@@ -366,14 +430,33 @@ def _sentiment_line(info) -> str:
 
 
 def _write_market_snapshot(
-    report_dir: Path, day: date, info, model_ready: bool, use_ranker: bool
+    report_dir: Path,
+    day: date,
+    info,
+    model_ready: bool,
+    use_ranker: bool,
+    gate: PromoGateDecision,
+    risk_on: bool,
 ) -> None:
     if info is None:
         return
     payload = market_day_payload(day, info)
     payload["model_ready"] = model_ready
     payload["use_ranker"] = use_ranker
-    payload["entry_note"] = "允许开新仓" if info.risk_on else "今日不开新仓"
+    if not risk_on:
+        payload["entry_note"] = "今日不开新仓"
+    elif gate.blocked:
+        payload["entry_note"] = "行情过滤允许开仓，但 1进2 落在训练窗低档，模拟盘不写新委托"
+    else:
+        payload["entry_note"] = "允许开新仓"
+    payload["promo_gate_enabled"] = gate.state != "off"
+    payload["promo_gate"] = gate.state
+    payload["promo_gate_cut"] = gate.cut
+    payload["promo_gate_tercile"] = gate.tercile
+    payload["promo_gate_train_start"] = None if gate.train_start is None else gate.train_start.isoformat()
+    payload["promo_gate_train_end"] = None if gate.train_end is None else gate.train_end.isoformat()
+    payload["promo_gate_sample_size"] = gate.sample_size
+    payload["promo_gate_warning"] = gate.warning
     report_dir.mkdir(parents=True, exist_ok=True)
     (report_dir / "market_latest.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),

@@ -185,7 +185,12 @@ def _market_banner() -> None:
         st.info("还没有行情状态。运行 python -m ashare daily 之后，这里会显示过滤结果和涨停情绪。")
         return
     note = snapshot.get("entry_note") or ""
-    if snapshot.get("risk_on"):
+    gate = snapshot.get("promo_gate")
+    if gate == "closed":
+        st.warning(f"{snapshot.get('date', '')} {note or '1进2 落在低档，模拟盘不写新委托'}")
+    elif gate == "unavailable":
+        st.warning(f"{snapshot.get('date', '')} {snapshot.get('promo_gate_warning') or '1进2闸门无法计算，这次不拦截'}")
+    elif snapshot.get("risk_on"):
         st.success(f"{snapshot.get('date', '')} {note}")
     else:
         st.warning(f"{snapshot.get('date', '')} {note or '今日不开新仓'}")
@@ -202,6 +207,18 @@ def _market_banner() -> None:
         extra.append(f"等权指数相对均线 {float(versus) * 100:.2f}%")
     if prev is not None:
         extra.append(f"昨日涨停今日平均 {float(prev) * 100:.2f}%")
+    promo = snapshot.get("promo_1_2")
+    cut = snapshot.get("promo_gate_cut")
+    if gate == "open":
+        promo_text = "—" if promo is None else f"{float(promo) * 100:.1f}%"
+        cut_text = "—" if cut is None else f"{float(cut) * 100:.1f}%"
+        extra.append(f"1进2 {promo_text}，低档切点 {cut_text}，闸门开启")
+    elif gate == "closed":
+        promo_text = "—" if promo is None else f"{float(promo) * 100:.1f}%"
+        cut_text = "—" if cut is None else f"{float(cut) * 100:.1f}%"
+        extra.append(f"1进2 {promo_text}，低档切点 {cut_text}，闸门关闭，已有持仓照常卖出")
+    elif gate == "off":
+        extra.append("1进2低档闸门未开启")
     if snapshot.get("use_ranker") is False:
         extra.append("排序模型已关闭")
     elif snapshot.get("model_ready"):

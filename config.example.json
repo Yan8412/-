@@ -22,6 +22,9 @@
   "ml_pool": 80,
   "strategies": ["first_board_follow", "ma_pullback"],
   "use_ranker": false,
+  "promo_gate_enabled": false,
+  "promo_gate_train_days": 140,
+  "promo_gate_test_days": 70,
   "ths_api_key_env": "THS_API_KEY",
   "tdx_hosts": [
     "116.205.183.150:7709",

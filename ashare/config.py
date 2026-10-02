@@ -70,6 +70,13 @@ class Settings:
         default_factory=lambda: ["first_board_follow", "ma_pullback"]
     )
     use_ranker: bool = False
+    # Paper-only. The study locked this rule before the holdout: skip new
+    # entries when today's 1进2 rate is in the low tercile of the walk-forward
+    # training window (140 sessions, then a 70-session test block). Exits are
+    # unchanged. Default off; turn it on with promo_gate_enabled.
+    promo_gate_enabled: bool = False
+    promo_gate_train_days: int = 140
+    promo_gate_test_days: int = 70
     # Environment variable that holds the Tonghuashun Financial-API key.
     # The value itself is never stored in this file.
     ths_api_key_env: str = "THS_API_KEY"
@@ -94,7 +101,15 @@ def load_settings(path: Path | None = None) -> Settings:
         raise ValueError("config.json 必须是对象")
     known = {item.name for item in fields(settings)}
     data = asdict(settings)
-    special = {"stamp_duty_change", "strategies", "use_ranker", "tdx_hosts"}
+    special = {
+        "stamp_duty_change",
+        "strategies",
+        "use_ranker",
+        "tdx_hosts",
+        "promo_gate_enabled",
+        "promo_gate_train_days",
+        "promo_gate_test_days",
+    }
     for key, value in payload.items():
         if key not in known or key in special:
             continue
@@ -112,7 +127,22 @@ def load_settings(path: Path | None = None) -> Settings:
         data["use_ranker"] = value
     if "tdx_hosts" in payload:
         data["tdx_hosts"] = _parse_tdx_hosts(payload["tdx_hosts"])
+    if "promo_gate_enabled" in payload:
+        value = payload["promo_gate_enabled"]
+        if not isinstance(value, bool):
+            raise ValueError("promo_gate_enabled 必须是 JSON 布尔值 true 或 false")
+        data["promo_gate_enabled"] = value
+    if "promo_gate_train_days" in payload:
+        data["promo_gate_train_days"] = _positive_int(payload["promo_gate_train_days"], "promo_gate_train_days")
+    if "promo_gate_test_days" in payload:
+        data["promo_gate_test_days"] = _positive_int(payload["promo_gate_test_days"], "promo_gate_test_days")
     return Settings(**data)
+
+
+def _positive_int(value: object, name: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{name} 必须是正整数")
+    return value
 
 
 def _parse_tdx_hosts(value: object) -> list[str]:
