@@ -65,6 +65,15 @@ FEATURE_NAMES: tuple[str, ...] = (
     "prev_limit_missing",
     "index_vs_ma",
     "index_ma_missing",
+    "promo_1_2",
+    "promo_1_2_missing",
+    "promo_2_3",
+    "promo_2_3_missing",
+    "promo_3p",
+    "promo_3p_missing",
+    "board_premium",
+    "board_premium_missing",
+    "ladder_gap",
     "board_main",
     "board_chinext",
     "board_star",
@@ -80,6 +89,15 @@ GRID: tuple[dict, ...] = (
     {"max_depth": 3, "min_samples_leaf": 80, "learning_rate": 0.05, "n_estimators": 80},
 )
 FALLBACK_PARAMS: dict = dict(GRID[len(GRID) // 2])
+
+
+def feature_names(extra: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """Base columns plus any confirmed stock factors and their missing flags."""
+    names = list(FEATURE_NAMES)
+    for item in extra:
+        names.append(item)
+        names.append(f"{item}_missing")
+    return tuple(names)
 
 
 @dataclass
@@ -111,6 +129,8 @@ def feature_vector(
     strategy_id: str,
     rule_score: float,
     panel: MarketPanel,
+    extra_factors: tuple[str, ...] = (),
+    extra_values: dict[str, float] | None = None,
 ) -> np.ndarray:
     """Features known at the signal close. Later bars are not read."""
     close = float(series.close[index])
@@ -141,23 +161,23 @@ def feature_vector(
         prev_missing = 1.0
         versus = 0.0
         versus_missing = 1.0
+        promo_1_2, promo_1_2_missing = 0.0, 1.0
+        promo_2_3, promo_2_3_missing = 0.0, 1.0
+        promo_3p, promo_3p_missing = 0.0, 1.0
+        premium, premium_missing = 0.0, 1.0
+        ladder_gap = 0.0
     else:
         breadth = info.breadth if math.isfinite(info.breadth) else 0.0
         log_up = math.log1p(info.limit_up_count)
         broken = info.broken_rate if math.isfinite(info.broken_rate) else 0.0
         max_height = float(info.max_height)
-        if math.isfinite(info.prev_limit_return):
-            prev = info.prev_limit_return
-            prev_missing = 0.0
-        else:
-            prev = 0.0
-            prev_missing = 1.0
-        if math.isfinite(info.index_vs_ma):
-            versus = info.index_vs_ma
-            versus_missing = 0.0
-        else:
-            versus = 0.0
-            versus_missing = 1.0
+        prev, prev_missing = _filled(info.prev_limit_return)
+        versus, versus_missing = _filled(info.index_vs_ma)
+        promo_1_2, promo_1_2_missing = _filled(info.promo_1_2)
+        promo_2_3, promo_2_3_missing = _filled(info.promo_2_3)
+        promo_3p, promo_3p_missing = _filled(info.promo_3p)
+        premium, premium_missing = _filled(info.board_premium)
+        ladder_gap = float(info.ladder_gap)
     board = classify_board(series.code)
     values = [
         float(rule_score),
@@ -178,12 +198,33 @@ def feature_vector(
         prev_missing,
         versus,
         versus_missing,
+        promo_1_2,
+        promo_1_2_missing,
+        promo_2_3,
+        promo_2_3_missing,
+        promo_3p,
+        promo_3p_missing,
+        premium,
+        premium_missing,
+        ladder_gap,
         1.0 if board == "main" else 0.0,
         1.0 if board == "chinext" else 0.0,
         1.0 if board == "star" else 0.0,
         1.0 if board == "bj" else 0.0,
     ]
+    looked_up = extra_values or {}
+    for name in extra_factors:
+        raw = looked_up.get(name, float("nan"))
+        filled, missing = _filled(raw)
+        values.append(filled)
+        values.append(missing)
     return np.asarray(values, dtype=float)
+
+
+def _filled(value: float) -> tuple[float, float]:
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return float(value), 0.0
+    return 0.0, 1.0
 
 
 def build_labeled_rows(
@@ -191,11 +232,18 @@ def build_labeled_rows(
     book: dict[date, list[PendingBuy]],
     panel: MarketPanel,
     settings: Settings,
+    extra_factors: tuple[str, ...] = (),
 ) -> list[LabeledRow]:
     """One row per rule candidate. Unfilled and unfinished trades have no label."""
     by_code = {item.code: item for item in symbols}
     calendar = panel.calendar
     calendar_index = {day: index for index, day in enumerate(calendar)}
+    factor_cache: dict[str, dict[str, np.ndarray]] = {}
+    if extra_factors:
+        from ashare.factors import compute_factors
+
+        for series in symbols:
+            factor_cache[series.code] = compute_factors(series, extra_factors)
     rows: list[LabeledRow] = []
     days = sorted(book)
     for nth, day in enumerate(days):
@@ -206,7 +254,22 @@ def build_labeled_rows(
             if series is None or day not in series.date_index:
                 continue
             index = series.date_index[day]
-            features = feature_vector(series, index, order.strategy_id, order.score, panel)
+            extra_values = None
+            if extra_factors:
+                arrays = factor_cache.get(series.code, {})
+                extra_values = {
+                    name: float(arrays[name][index]) if name in arrays and index < len(arrays[name]) else float("nan")
+                    for name in extra_factors
+                }
+            features = feature_vector(
+                series,
+                index,
+                order.strategy_id,
+                order.score,
+                panel,
+                extra_factors=extra_factors,
+                extra_values=extra_values,
+            )
             label, exit_date = trade_net_return(series, order, settings, calendar, calendar_index)
             rows.append(
                 LabeledRow(
@@ -361,7 +424,10 @@ def refit_points(calendar: list[date], rows: list[LabeledRow]) -> list[date]:
 
 
 def fit_schedule(
-    rows: list[LabeledRow], calendar: list[date], params: dict
+    rows: list[LabeledRow],
+    calendar: list[date],
+    params: dict,
+    names: tuple[str, ...] | None = None,
 ) -> tuple[RankSchedule, dict[str, float], GradientBoostingRegressor | None]:
     """Causal models before the holdout, then one model frozen at the holdout."""
     points = refit_points(calendar, rows)
@@ -377,13 +443,14 @@ def fit_schedule(
     frozen_rows = rows_for_training(rows, HOLDOUT_START)
     importances: dict[str, float] = {}
     frozen: GradientBoostingRegressor | None = None
+    active = names if names is not None else FEATURE_NAMES
     if len(frozen_rows) >= MIN_TRAIN_ROWS:
         logger.info("冻结样本外模型，训练样本 %s，截止 %s", len(frozen_rows), HOLDOUT_START.isoformat())
         frozen = fit_model(frozen_rows, params)
         segments.append((HOLDOUT_START, date.max, frozen))
         importances = {
             name: float(value)
-            for name, value in zip(FEATURE_NAMES, frozen.feature_importances_, strict=True)
+            for name, value in zip(active, frozen.feature_importances_, strict=True)
         }
     else:
         logger.info("样本外之前的完整交易只有 %s 笔，不训练模型", len(frozen_rows))

@@ -4,12 +4,17 @@ Every figure for a session uses that session's close and earlier bars only.
 Limit width follows the board: 10% main, 20% ChiNext and STAR, 30% Beijing.
 A main-board bar that is sealed inside the 5% band is treated as an ST
 limit, which is the width ST names actually trade at.
+
+Promotion rates, the consecutive-board premium, and the ladder gap follow
+the emotion-cycle ideas in simonlin1212/vibe-astock ``duanxian/emotion_metrics.py``
+(Apache-2.0). The arithmetic here is written against this project's own
+limit-up flags. It does not call that repository's Eastmoney data layer.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass
 from datetime import date
 
 import numpy as np
@@ -19,8 +24,11 @@ from ashare.filters import _cents
 from ashare.market import SymbolSeries, master_calendar
 from ashare.rules.limits import classify_board
 
+# Consecutive-board heights above this are counted in the top bin.
+_HEIGHT_CAP = 64
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, eq=False)
 class MarketDay:
     breadth: float
     breadth_count: int
@@ -32,6 +40,26 @@ class MarketDay:
     index_level: float
     index_vs_ma: float
     risk_on: bool
+    # Share of yesterday's 1-board names that sealed again today. NaN if none.
+    promo_1_2: float = float("nan")
+    # Same for yesterday's 2-board names, and for names already at 3 or higher.
+    promo_2_3: float = float("nan")
+    promo_3p: float = float("nan")
+    # Mean today-return of names whose consecutive height yesterday was >= 2.
+    board_premium: float = float("nan")
+    # Count of missing heights between 1 and today's maximum height.
+    ladder_gap: int = 0
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, MarketDay):
+            return NotImplemented
+        for left, right in zip(astuple(self), astuple(other), strict=True):
+            if isinstance(left, float) and isinstance(right, float):
+                if math.isnan(left) and math.isnan(right):
+                    continue
+            if left != right:
+                return False
+        return True
 
 
 @dataclass
@@ -95,6 +123,11 @@ def build_market_panel(symbols: list[SymbolSeries], settings: Settings) -> Marke
     ret_n = np.zeros(len(calendar), dtype=np.int32)
     prev_sum = np.zeros(len(calendar), dtype=float)
     prev_n = np.zeros(len(calendar), dtype=np.int32)
+    promo_num = np.zeros((len(calendar), 3), dtype=np.int32)
+    promo_den = np.zeros((len(calendar), 3), dtype=np.int32)
+    premium_sum = np.zeros(len(calendar), dtype=float)
+    premium_n = np.zeros(len(calendar), dtype=np.int32)
+    height_counts = np.zeros((len(calendar), _HEIGHT_CAP), dtype=np.int16)
 
     for series in symbols:
         is_up, is_broken, bars_height = _limit_events(series)
@@ -119,12 +152,25 @@ def build_market_panel(symbols: list[SymbolSeries], settings: Settings) -> Marke
             if np.isfinite(returns[index]):
                 ret_sum[slot] += returns[index]
                 ret_n[slot] += 1
-            if index > 0 and is_up[index - 1] and np.isfinite(returns[index]):
+            bars_today = int(bars_height[index])
+            if bars_today > 0:
+                height_counts[slot, min(bars_today, _HEIGHT_CAP - 1)] += 1
+            if index > 0 and series.volume[index - 1] > 0:
                 prev_day = series.dates[index - 1]
                 prev_slot = cal_index.get(prev_day)
                 if prev_slot is not None and slot == prev_slot + 1:
-                    prev_sum[slot] += returns[index]
-                    prev_n[slot] += 1
+                    if is_up[index - 1] and np.isfinite(returns[index]):
+                        prev_sum[slot] += returns[index]
+                        prev_n[slot] += 1
+                    yesterday = int(bars_height[index - 1])
+                    tier = _promo_tier(yesterday)
+                    if tier >= 0:
+                        promo_den[slot, tier] += 1
+                        if is_up[index]:
+                            promo_num[slot, tier] += 1
+                    if yesterday >= 2 and np.isfinite(returns[index]):
+                        premium_sum[slot] += returns[index]
+                        premium_n[slot] += 1
 
     level = 100.0
     levels = np.empty(len(calendar), dtype=float)
@@ -150,17 +196,23 @@ def build_market_panel(symbols: list[SymbolSeries], settings: Settings) -> Marke
             and np.isfinite(versus)
             and versus >= 0.0
         )
+        peak = int(max_height[slot])
         days[day] = MarketDay(
             breadth=breadth,
             breadth_count=total,
             limit_up_count=int(up_count[slot]),
             broken_count=int(broken_count[slot]),
             broken_rate=broken_rate,
-            max_height=int(max_height[slot]),
+            max_height=peak,
             prev_limit_return=prev_ret,
             index_level=float(levels[slot]),
             index_vs_ma=versus,
             risk_on=risk_on,
+            promo_1_2=_rate(int(promo_num[slot, 0]), int(promo_den[slot, 0])),
+            promo_2_3=_rate(int(promo_num[slot, 1]), int(promo_den[slot, 1])),
+            promo_3p=_rate(int(promo_num[slot, 2]), int(promo_den[slot, 2])),
+            board_premium=float(premium_sum[slot] / premium_n[slot]) if premium_n[slot] else float("nan"),
+            ladder_gap=_ladder_gap(height_counts[slot], peak),
         )
     return MarketPanel(days=days, calendar=calendar, limit_up=limit_up, height=height)
 
@@ -189,7 +241,42 @@ def market_day_payload(day: date, info: MarketDay) -> dict:
         "prev_limit_return": _json_number(info.prev_limit_return),
         "index_level": _json_number(info.index_level),
         "index_vs_ma": _json_number(info.index_vs_ma),
+        "promo_1_2": _json_number(info.promo_1_2),
+        "promo_2_3": _json_number(info.promo_2_3),
+        "promo_3p": _json_number(info.promo_3p),
+        "board_premium": _json_number(info.board_premium),
+        "ladder_gap": info.ladder_gap,
     }
+
+
+def _promo_tier(yesterday_height: int) -> int:
+    """0 = 1→2, 1 = 2→3, 2 = 3+→next. -1 when yesterday was not a board."""
+    if yesterday_height == 1:
+        return 0
+    if yesterday_height == 2:
+        return 1
+    if yesterday_height >= 3:
+        return 2
+    return -1
+
+
+def _rate(numerator: int, denominator: int) -> float:
+    if denominator <= 0:
+        return float("nan")
+    return float(numerator / denominator)
+
+
+def _ladder_gap(counts: np.ndarray, max_height: int) -> int:
+    """How many rungs from 1 through ``max_height`` have no stock today."""
+    if max_height <= 1:
+        return 0
+    cap = len(counts) - 1
+    limit = min(max_height, cap)
+    present = int(np.count_nonzero(counts[1 : limit + 1]))
+    missing = limit - present
+    if max_height > cap:
+        missing += max_height - cap
+    return int(missing)
 
 
 def _limit_events(series: SymbolSeries) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

@@ -56,6 +56,10 @@ def build_parser() -> argparse.ArgumentParser:
     research.add_argument("--report-dir", type=Path, default=None)
     research.add_argument("--cache-dir", type=Path, default=None)
 
+    study = sub.add_parser("study", help="情绪特征、三分位和因子筛选的一次样本外对照，不改默认配置")
+    study.add_argument("--report-dir", type=Path, default=None)
+    study.add_argument("--cache-dir", type=Path, default=None)
+
     train = sub.add_parser("train", help="用已经完成的交易重训排序模型，超参仍只在样本外之前选定")
     train.add_argument("--report-dir", type=Path, default=None)
     train.add_argument("--cache-dir", type=Path, default=None)
@@ -121,6 +125,15 @@ def main(argv: list[str] | None = None) -> int:
         from ashare.research import run_regime_research
 
         path = run_regime_research(
+            settings, today, cache_dir(args.cache_dir), report_dir(args.report_dir)
+        )
+        print(f"已写出 {path}")
+        return 0
+
+    if args.command == "study":
+        from ashare.study import run_sentiment_factor_study
+
+        path = run_sentiment_factor_study(
             settings, today, cache_dir(args.cache_dir), report_dir(args.report_dir)
         )
         print(f"已写出 {path}")

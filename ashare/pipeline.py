@@ -355,9 +355,12 @@ def _sentiment_line(info) -> str:
     prev = "无" if not math.isfinite(info.prev_limit_return) else f"{info.prev_limit_return * 100:.2f}%"
     versus = "无" if not math.isfinite(info.index_vs_ma) else f"{info.index_vs_ma * 100:.2f}%"
     breadth = "无" if not math.isfinite(info.breadth) else f"{info.breadth * 100:.2f}%"
+    promo = "无" if not math.isfinite(info.promo_1_2) else f"{info.promo_1_2 * 100:.1f}%"
+    premium = "无" if not math.isfinite(info.board_premium) else f"{info.board_premium * 100:.2f}%"
     return (
         f"涨停 {info.limit_up_count} 家，炸板率 {info.broken_rate * 100:.1f}%，"
-        f"最高连板 {info.max_height}，昨日涨停今日平均涨跌 {prev}，"
+        f"最高连板 {info.max_height}，梯队断层 {info.ladder_gap}，"
+        f"1进2 {promo}，连板溢价 {premium}，昨日涨停今日平均涨跌 {prev}，"
         f"站上 MA20 的比例 {breadth}（{info.breadth_count} 只），等权指数相对均线 {versus}。"
     )
 
