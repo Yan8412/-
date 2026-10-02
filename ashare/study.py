@@ -279,9 +279,8 @@ def render_report(payload: dict) -> str:
             (
                 "样本是上面「均线回踩 + 行情过滤」样本外账户里已经平仓的交易。"
                 "入场前夜是信号日收盘。某一天落在哪一档，只看它所在走步测试窗对应的训练窗："
-                f"训练 {payload.get('baseline', {}).get('start', '')} 这段日历上，"
                 "训练窗内、且当时允许开仓的交易日，用该指标的平均秩百分位切成三档。"
-                "测试日不进入切点。分档不齐的交易单独计，不挪到相邻档。"
+                "测试日的取值不进入切点。分档不齐的交易单独计，不挪到相邻档。"
             ),
             "",
             (
@@ -311,6 +310,13 @@ def render_report(payload: dict) -> str:
             f"训练窗两端平均盈亏之差为 {gate['train_spread']:.2f} 元，较差一端平均盈亏 {gate['train_worst_mean']:.2f} 元。"
             "样本外只把这条规则评估了一次。切点仍按每个走步训练窗更新，丢掉哪一端不再改。"
         )
+        lines.append("")
+        lines.append(
+            "两端之差大，主要是因为较好的一端在样本外之前赚得多，较差的一端只是略亏。"
+            "规则只比较低档和高档，中间档即使更差也不会被丢掉。下面是选定规则时用的样本外之前的分档，不是样本外表。"
+        )
+        lines.append("")
+        lines.append(_train_diag_table(payload.get("train_gate_diag") or []))
         lines.append("")
         lines.append(_account_table([("均线回踩 + 预承诺的收紧过滤", payload.get("gate_oos"))]))
     proposal = payload.get("proposed_config")
@@ -476,6 +482,29 @@ def _proposal(tight: dict | None, gate) -> str:
     )
 
 
+def _train_diag_table(rows: list[dict]) -> str:
+    lines = [
+        "| 指标 | 低档笔数 | 低档均盈亏 | 低档 t | 高档笔数 | 高档均盈亏 | 高档 t |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in rows:
+        counts = row.get("counts") or {}
+        means = row.get("means") or {}
+        tstats = row.get("tstats") or {}
+        lines.append(
+            "| {label} | {c0} | {m0} | {t0} | {c2} | {m2} | {t2} |".format(
+                label=row.get("label") or row.get("feature"),
+                c0=counts.get("0", counts.get(0, 0)),
+                m0=_yuan(means.get("0", means.get(0))),
+                t0=_t(tstats.get("0", tstats.get(0))),
+                c2=counts.get("2", counts.get(2, 0)),
+                m2=_yuan(means.get("2", means.get(2))),
+                t2=_t(tstats.get("2", tstats.get(2))),
+            )
+        )
+    return "\n".join(lines)
+
+
 def _account_table(rows: list[tuple[str, dict | None]]) -> str:
     lines = [
         "| 方案 | 总收益 | t | 成交笔数 | 最大回撤 | 胜率 |",
@@ -616,6 +645,12 @@ def _jsonable(value):
     if isinstance(value, np.integer):
         return int(value)
     return value
+
+
+def _yuan(value) -> str:
+    if value is None or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        return "—"
+    return f"{float(value):.2f}"
 
 
 def _pct(value: float | None) -> str:

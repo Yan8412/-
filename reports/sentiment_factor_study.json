@@ -1,0 +1,591 @@
+{
+  "oos_start": "2025-04-25",
+  "oos_end": "2026-06-23",
+  "full_start": "2024-09-24",
+  "initial_capital": 20000.0,
+  "baseline": {
+    "total_return": 0.24876600000000004,
+    "max_drawdown": -0.18974304071995962,
+    "trade_count": 185,
+    "win_rate": 0.43243243243243246,
+    "avg_win": 371.892625,
+    "avg_loss": -235.96276190476192,
+    "final_equity": 24975.32,
+    "tstat": 1.0654845251433318,
+    "verdict": "样本外收益为正，但单笔盈亏的 t 统计量绝对值小于 2，统计上还不能说有优势，不适合当成交易依据。",
+    "start": "2025-04-25",
+    "end": "2026-06-23"
+  },
+  "sentiment_ranker": {
+    "oos": {
+      "total_return": 0.047004999999999963,
+      "max_drawdown": -0.17168409052060207,
+      "trade_count": 188,
+      "win_rate": 0.425531914893617,
+      "avg_win": 263.24699999999996,
+      "avg_loss": -186.29314814814813,
+      "final_equity": 20940.1,
+      "tstat": 0.26563017783312826,
+      "verdict": "样本外收益为正，但单笔盈亏的 t 统计量绝对值小于 2，统计上还不能说有优势，不适合当成交易依据。",
+      "start": "2025-04-25",
+      "end": "2026-06-23"
+    },
+    "params": {
+      "max_depth": 3,
+      "min_samples_leaf": 80,
+      "learning_rate": 0.05,
+      "n_estimators": 80
+    },
+    "used_fallback": false,
+    "hyperparam_folds": 4,
+    "train_rows": 11471,
+    "importances": [
+      {
+        "feature": "log_limit_up_count",
+        "importance": 0.23151868327720077
+      },
+      {
+        "feature": "board_premium",
+        "importance": 0.1539680229115744
+      },
+      {
+        "feature": "index_vs_ma",
+        "importance": 0.09870281205154458
+      },
+      {
+        "feature": "promo_1_2",
+        "importance": 0.09518661759194182
+      },
+      {
+        "feature": "breadth",
+        "importance": 0.08111486601783476
+      },
+      {
+        "feature": "promo_3p",
+        "importance": 0.07655780437140683
+      },
+      {
+        "feature": "broken_rate",
+        "importance": 0.05778109373001025
+      },
+      {
+        "feature": "prev_limit_return",
+        "importance": 0.05517152693012815
+      },
+      {
+        "feature": "promo_2_3",
+        "importance": 0.046119172832643635
+      },
+      {
+        "feature": "log_amount",
+        "importance": 0.026935392423953854
+      },
+      {
+        "feature": "ladder_gap",
+        "importance": 0.022652533045337857
+      },
+      {
+        "feature": "market_max_height",
+        "importance": 0.021038952734335804
+      }
+    ],
+    "model_ready": true,
+    "extra_factors": []
+  },
+  "factor_ranker": {
+    "oos": {
+      "total_return": 0.12332100000000001,
+      "max_drawdown": -0.1132805716324553,
+      "trade_count": 207,
+      "win_rate": 0.4396135265700483,
+      "avg_win": 299.26945054945054,
+      "avg_loss": -213.50948275862066,
+      "final_equity": 22466.42,
+      "tstat": 0.6215782362910046,
+      "verdict": "样本外收益为正，但单笔盈亏的 t 统计量绝对值小于 2，统计上还不能说有优势，不适合当成交易依据。",
+      "start": "2025-04-25",
+      "end": "2026-06-23"
+    },
+    "params": {
+      "max_depth": 3,
+      "min_samples_leaf": 80,
+      "learning_rate": 0.05,
+      "n_estimators": 80
+    },
+    "used_fallback": false,
+    "hyperparam_folds": 4,
+    "train_rows": 11471,
+    "importances": [
+      {
+        "feature": "log_limit_up_count",
+        "importance": 0.23300797426389194
+      },
+      {
+        "feature": "board_premium",
+        "importance": 0.15527944882862096
+      },
+      {
+        "feature": "index_vs_ma",
+        "importance": 0.10297612970499755
+      },
+      {
+        "feature": "promo_1_2",
+        "importance": 0.08327091332491508
+      },
+      {
+        "feature": "breadth",
+        "importance": 0.07390805928464578
+      },
+      {
+        "feature": "promo_3p",
+        "importance": 0.06955311153516518
+      },
+      {
+        "feature": "broken_rate",
+        "importance": 0.05762929538013538
+      },
+      {
+        "feature": "prev_limit_return",
+        "importance": 0.0565266465598293
+      },
+      {
+        "feature": "promo_2_3",
+        "importance": 0.04438813225956143
+      },
+      {
+        "feature": "log_amount",
+        "importance": 0.02969337059005912
+      },
+      {
+        "feature": "ladder_gap",
+        "importance": 0.02177909525267192
+      },
+      {
+        "feature": "KLEN",
+        "importance": 0.020642215219946837
+      }
+    ],
+    "model_ready": true,
+    "extra_factors": [
+      "KLEN",
+      "KUP",
+      "ROC5",
+      "STD5",
+      "BETA10",
+      "RANK10",
+      "CORR10",
+      "SUMP5",
+      "VMA5"
+    ]
+  },
+  "confirmed_factors": [
+    "KLEN",
+    "KUP",
+    "ROC5",
+    "STD5",
+    "BETA10",
+    "RANK10",
+    "CORR10",
+    "SUMP5",
+    "VMA5"
+  ],
+  "factors": [
+    {
+      "name": "KMID",
+      "train_mean_ic": -0.014832780435167111,
+      "train_t": -1.0633182528983327,
+      "train_days": 205,
+      "test_mean_ic": -0.03600565770536456,
+      "test_t": -3.3807479324938576,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "noise"
+    },
+    {
+      "name": "KLEN",
+      "train_mean_ic": -0.1085112693233998,
+      "train_t": -4.480256148151233,
+      "train_days": 205,
+      "test_mean_ic": -0.06700821502494023,
+      "test_t": -2.1396207970687926,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "confirmed"
+    },
+    {
+      "name": "KUP",
+      "train_mean_ic": -0.05612979876103648,
+      "train_t": -5.455865624041409,
+      "train_days": 205,
+      "test_mean_ic": -0.045704345842876054,
+      "test_t": -3.047302460268649,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "confirmed"
+    },
+    {
+      "name": "KSFT",
+      "train_mean_ic": 0.004492970950175138,
+      "train_t": 0.34777877814277325,
+      "train_days": 205,
+      "test_mean_ic": -0.021128079361712016,
+      "test_t": -1.9896574979159347,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "noise"
+    },
+    {
+      "name": "RSV5",
+      "train_mean_ic": -0.018937900242484852,
+      "train_t": -1.166460672764483,
+      "train_days": 205,
+      "test_mean_ic": -0.04468352143726921,
+      "test_t": -3.5969775135794784,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "noise"
+    },
+    {
+      "name": "ROC5",
+      "train_mean_ic": 0.04481592303724036,
+      "train_t": 2.248605888518141,
+      "train_days": 205,
+      "test_mean_ic": 0.07995731573412997,
+      "test_t": 4.334646440104651,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "confirmed"
+    },
+    {
+      "name": "MA5",
+      "train_mean_ic": 0.029614000241066755,
+      "train_t": 1.6015770487555399,
+      "train_days": 205,
+      "test_mean_ic": 0.07877164665391292,
+      "test_t": 4.420440934642937,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "noise"
+    },
+    {
+      "name": "STD5",
+      "train_mean_ic": -0.07774005454260095,
+      "train_t": -3.3326302216454327,
+      "train_days": 205,
+      "test_mean_ic": -0.0600648100987372,
+      "test_t": -2.004058588865056,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "confirmed"
+    },
+    {
+      "name": "BETA10",
+      "train_mean_ic": -0.05025043443924169,
+      "train_t": -2.056447660351697,
+      "train_days": 205,
+      "test_mean_ic": -0.06127889445667035,
+      "test_t": -2.786673015986537,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "confirmed"
+    },
+    {
+      "name": "RANK10",
+      "train_mean_ic": -0.05276737086152621,
+      "train_t": -2.608282648150652,
+      "train_days": 205,
+      "test_mean_ic": -0.06012991062302754,
+      "test_t": -4.762336670004927,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "confirmed"
+    },
+    {
+      "name": "CORR10",
+      "train_mean_ic": -0.09030341696875048,
+      "train_t": -6.100439250310731,
+      "train_days": 205,
+      "test_mean_ic": -0.05944447152569103,
+      "test_t": -4.078177014920568,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "confirmed"
+    },
+    {
+      "name": "CNTD5",
+      "train_mean_ic": -0.02863448176336969,
+      "train_t": -1.8905219098037154,
+      "train_days": 205,
+      "test_mean_ic": -0.04839866157926995,
+      "test_t": -4.463720896474682,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "noise"
+    },
+    {
+      "name": "SUMP5",
+      "train_mean_ic": -0.04701252415017958,
+      "train_t": -2.479132167643728,
+      "train_days": 205,
+      "test_mean_ic": -0.06064737010291089,
+      "test_t": -4.434237045381852,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "confirmed"
+    },
+    {
+      "name": "MAX5",
+      "train_mean_ic": -0.046917707452834564,
+      "train_t": -1.9424977982478924,
+      "train_days": 205,
+      "test_mean_ic": 7.314426794310998e-05,
+      "test_t": 0.0027629258232718945,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "noise"
+    },
+    {
+      "name": "VMA5",
+      "train_mean_ic": 0.027994657958643056,
+      "train_t": 2.5204240231376867,
+      "train_days": 205,
+      "test_mean_ic": 0.03707785026210413,
+      "test_t": 4.07118652648275,
+      "test_days": 135,
+      "train_span": "2023-11-14 ~ 2024-09-12",
+      "test_span": "2024-09-24 ~ 2025-04-17",
+      "klass": "confirmed"
+    }
+  ],
+  "terciles": {
+    "limit_up_count": [
+      {
+        "tercile": 0,
+        "trade_count": 82,
+        "pnl": 1151.57,
+        "contribution": 0.0575785,
+        "mean_return": 0.0027060831672642656,
+        "tstat": 0.4153062289480703,
+        "mean_cost": 5355.846341463415
+      },
+      {
+        "tercile": 1,
+        "trade_count": 50,
+        "pnl": 5494.5,
+        "contribution": 0.274725,
+        "mean_return": 0.022654211739870336,
+        "tstat": 2.061527388174604,
+        "mean_cost": 5519.155600000001
+      },
+      {
+        "tercile": 2,
+        "trade_count": 53,
+        "pnl": -1670.75,
+        "contribution": -0.0835375,
+        "mean_return": -0.005164362172571557,
+        "tstat": -0.6445846894022661,
+        "mean_cost": 5853.530943396227
+      },
+      {
+        "tercile": null,
+        "trade_count": 0,
+        "pnl": 0,
+        "contribution": 0.0,
+        "mean_return": 0.0,
+        "tstat": 0.0,
+        "mean_cost": 0.0
+      }
+    ],
+    "broken_rate": [
+      {
+        "tercile": 0,
+        "trade_count": 61,
+        "pnl": 1479.08,
+        "contribution": 0.07395399999999999,
+        "mean_return": 0.006243042274562739,
+        "tstat": 0.49824656945550366,
+        "mean_cost": 5514.317540983607
+      },
+      {
+        "tercile": 1,
+        "trade_count": 61,
+        "pnl": 2687.41,
+        "contribution": 0.1343705,
+        "mean_return": 0.009142744626747279,
+        "tstat": 1.12470570906858,
+        "mean_cost": 5291.365245901639
+      },
+      {
+        "tercile": 2,
+        "trade_count": 63,
+        "pnl": 808.8299999999999,
+        "contribution": 0.0404415,
+        "mean_return": 0.0022597652473489377,
+        "tstat": 0.29551949712462344,
+        "mean_cost": 5813.1376190476185
+      },
+      {
+        "tercile": null,
+        "trade_count": 0,
+        "pnl": 0,
+        "contribution": 0.0,
+        "mean_return": 0.0,
+        "tstat": 0.0,
+        "mean_cost": 0.0
+      }
+    ],
+    "promo_1_2": [
+      {
+        "tercile": 0,
+        "trade_count": 80,
+        "pnl": -410.21,
+        "contribution": -0.020510499999999997,
+        "mean_return": -0.0014387055194297641,
+        "tstat": -0.13233576635180921,
+        "mean_cost": 5575.9061249999995
+      },
+      {
+        "tercile": 1,
+        "trade_count": 57,
+        "pnl": 4285.5,
+        "contribution": 0.214275,
+        "mean_return": 0.014527092293188914,
+        "tstat": 1.684310787907519,
+        "mean_cost": 5635.776140350877
+      },
+      {
+        "tercile": 2,
+        "trade_count": 48,
+        "pnl": 1100.03,
+        "contribution": 0.0550015,
+        "mean_return": 0.007665633175114733,
+        "tstat": 0.4590648104276773,
+        "mean_cost": 5376.303958333333
+      },
+      {
+        "tercile": null,
+        "trade_count": 0,
+        "pnl": 0,
+        "contribution": 0.0,
+        "mean_return": 0.0,
+        "tstat": 0.0,
+        "mean_cost": 0.0
+      }
+    ]
+  },
+  "oos_trade_count": 185,
+  "gate": {
+    "feature": "promo_1_2",
+    "label": "1进2晋级率",
+    "drop_tercile": 0,
+    "train_spread": 162.3063712374582,
+    "train_worst_mean": -5.835217391304348
+  },
+  "gate_oos": {
+    "total_return": 0.44222950000000005,
+    "max_drawdown": -0.06606690506701096,
+    "trade_count": 143,
+    "win_rate": 0.5034965034965035,
+    "avg_win": 355.6041666666667,
+    "avg_loss": -236.04098591549297,
+    "final_equity": 28844.59,
+    "tstat": 2.165837026923407,
+    "verdict": "样本外收益为正，且单笔盈亏的 t 统计量绝对值达到 2。只适合用很小的资金做模拟盘观察；这只是一段历史窗口，不是稳定优势。",
+    "start": "2025-04-25",
+    "end": "2026-06-23"
+  },
+  "train_gate_diag": [
+    {
+      "feature": "limit_up_count",
+      "label": "涨停家数",
+      "counts": {
+        "0": 22,
+        "1": 9,
+        "2": 47
+      },
+      "means": {
+        "0": 23.327727272727273,
+        "1": -125.25333333333333,
+        "2": 70.89468085106384
+      },
+      "tstats": {
+        "0": 0.3971665679448476,
+        "1": -1.1304378658316883,
+        "2": 1.442283541262074
+      }
+    },
+    {
+      "feature": "broken_rate",
+      "label": "炸板率",
+      "counts": {
+        "0": 25,
+        "1": 19,
+        "2": 34
+      },
+      "means": {
+        "0": 46.378,
+        "1": -31.290526315789474,
+        "2": 63.32499999999999
+      },
+      "tstats": {
+        "0": 0.7565667765157604,
+        "1": -0.42351636024016787,
+        "2": 1.0938046786463855
+      }
+    },
+    {
+      "feature": "promo_1_2",
+      "label": "1进2晋级率",
+      "counts": {
+        "0": 23,
+        "1": 29,
+        "2": 26
+      },
+      "means": {
+        "0": -5.835217391304348,
+        "1": -41.93310344827586,
+        "2": 156.47115384615384
+      },
+      "tstats": {
+        "0": -0.09811504519339577,
+        "1": -0.7135148320724944,
+        "2": 2.3805302348569852
+      }
+    }
+  ],
+  "archived_baseline": {
+    "total_return": 0.1679925,
+    "max_drawdown": -0.17395735315282634,
+    "trade_count": 182,
+    "win_rate": 0.4175824175824176,
+    "tstat": 0.7636557167568746
+  },
+  "notes": [
+    "行情过滤仍是原来的三条：至少 200 只股票有 MA20，站上 MA20 的比例 ≥ 40%，等权指数不低于自身 20 日均线。",
+    "排序模型是 scikit-learn 的 GradientBoostingRegressor。标签是单笔扣费后收益率。买入失败或到样本结束仍未卖出的信号没有标签。",
+    "超参网格没有改。挑选只用信号日和卖出日都早于 2025-04-25 的交易。",
+    "确认因子 9 个。名单：KLEN、KUP、ROC5、STD5、BETA10、RANK10、CORR10、SUMP5、VMA5。",
+    "收紧规则如果存在，也只在样本外之前的交易上选定，样本外三分位表不参与选择。",
+    "t 描述的是这一段历史里这些交易有多散，不是未来还会重复的证明。|t| ≥ 2 才考虑提议改配置，而且默认值不会自动改掉。",
+    "股票池目录使用 catalog.json 缓存，共 5909 只。",
+    "日线路径：最近完成的交易日 2026-09-30 不是上海今天 2026-10-02，收盘快照不能当作当天收盘，改为逐只。缓存已覆盖 5650 只，逐只下载 58 只。",
+    "逐日 ST 与停牌：已有文件的短缺口用 Baostock query_all_stock 按天补（名称里的 ST 和 tradeStatus），没有文件或缺口很大才逐只查 isST。按当天判断，不用今天的名称。这次已是最新 5683 只，短缺口 0 只，全市场快照 0 天，逐只回补 25 只，失败 0 只。没有逐日记录的股票不按当前名称整段排除。主板 ST 当日涨跌停按 5%，创业板和科创板仍是 20%，北交所仍是 30%。",
+    "主行情源为腾讯日线（不复权，含除权信息）；单只失败时改用新浪日线。缓存只缺今天这一根、并且上海时间已经过 15:30 时，用新浪和腾讯的批量收盘快照补上，不再逐只请求。快照昨收和缓存最后收盘价对不上的（除权，或缓存是复权价）仍逐只下载，以便带上分红送转。停牌不写空 K 线。盘中、周末和休市日仍走逐只。退市代码来自 Baostock 的上市/退市日期，日线仍向腾讯请求。2026-09-27 探测东财 push2his 得到空响应，本次运行没有访问东财。"
+  ],
+  "config_unchanged": true,
+  "proposed_config": "可以考虑把行情过滤再加一条：信号日的1进2晋级率低于训练窗低分位时不开新仓。这条规则的样本外收益 44.22%，t = 2.17，143 笔。默认配置没有改，需要人工确认后再写入。"
+}

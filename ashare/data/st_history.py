@@ -37,8 +37,8 @@ BACKFILL_CAP = 40
 # One call per session. A long outage continues on the next run.
 MAX_BULK_DAYS = 15
 
-# cache_dir -> (mtime, code -> day -> (is_st, trading))
-_BULK_CACHE: dict[str, tuple[int, dict[str, dict[date, tuple[bool, bool]]]]] = {}
+# cache_dir -> (mtime, code -> (days since 1970-01-01, flag byte))
+_BULK_CACHE: dict[str, tuple[int, dict[str, tuple[np.ndarray, np.ndarray]]]] = {}
 
 
 def status_path(cache_dir: Path, code: str) -> Path:
@@ -73,8 +73,8 @@ def load_status(cache_dir: Path, code: str) -> dict[date, tuple[bool, bool]] | N
     path = status_path(cache_dir, symbol)
     meta = _read_meta(path)
     records = read_records(path)
-    bulk = _bulk_index(cache_dir).get(symbol, {})
-    if not records and meta is None and not bulk:
+    packed = _bulk_packed(cache_dir).get(symbol)
+    if not records and meta is None and packed is None:
         return None
     out: dict[date, tuple[bool, bool]] = {}
     for row in records:
@@ -83,7 +83,11 @@ def load_status(cache_dir: Path, code: str) -> dict[date, tuple[bool, bool]] | N
         except ValueError:
             continue
         out[day] = (bool(row.get("is_st")), bool(row.get("trading")))
-    out.update(bulk)
+    if packed is not None:
+        days, flags = packed
+        epoch = date(1970, 1, 1)
+        for day_num, flag in zip(days.tolist(), flags.tolist()):
+            out[epoch + timedelta(days=int(day_num))] = (bool(flag & 1), bool(flag & 2))
     return out
 
 
@@ -340,7 +344,12 @@ def _store_bulk(cache_dir: Path, day: date, rows: list[dict]) -> None:
     _BULK_CACHE.pop(str(Path(cache_dir).resolve()), None)
 
 
-def _bulk_index(cache_dir: Path) -> dict[str, dict[date, tuple[bool, bool]]]:
+def _bulk_packed(cache_dir: Path) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """One symbol at a time: days since 1970-01-01, and a flag byte (bit 0 ST, bit 1 trading).
+
+    The merged snapshot is millions of rows. A Python dict of dates does not fit
+    in 8 GB once the rest of the market is loaded, so the cache stays columnar.
+    """
     path = _bulk_path(cache_dir)
     key = str(Path(cache_dir).resolve())
     if not path.exists():
@@ -349,18 +358,40 @@ def _bulk_index(cache_dir: Path) -> dict[str, dict[date, tuple[bool, bool]]]:
     cached = _BULK_CACHE.get(key)
     if cached is not None and cached[0] == stamp:
         return cached[1]
-    index: dict[str, dict[date, tuple[bool, bool]]] = {}
-    for row in read_records(path):
-        symbol = str(row.get("code") or "")
-        try:
-            day = date.fromisoformat(str(row.get("date") or "")[:10])
-        except ValueError:
-            continue
-        if not symbol:
-            continue
-        index.setdefault(symbol, {})[day] = (bool(row.get("is_st")), bool(row.get("trading")))
-    _BULK_CACHE[key] = (stamp, index)
-    return index
+    try:
+        import pyarrow.compute as pc
+        import pyarrow.parquet as pq
+    except ImportError:
+        logger.warning("未安装 pyarrow，无法读取全市场 ST 快照。")
+        return {}
+    table = pq.read_table(path, columns=["date", "code", "is_st", "trading"])
+    if table.num_rows == 0:
+        packed: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        _BULK_CACHE[key] = (stamp, packed)
+        return packed
+    parsed = pc.strptime(table.column("date"), format="%Y-%m-%d", unit="s")
+    day_num = pc.cast(pc.divide(pc.cast(parsed, "int64"), 86400), "int32").to_numpy(zero_copy_only=False)
+    codes = table.column("code").to_numpy(zero_copy_only=False)
+    is_st = np.asarray(table.column("is_st").fill_null(False).to_numpy(zero_copy_only=False), dtype=bool)
+    trading = np.asarray(table.column("trading").fill_null(False).to_numpy(zero_copy_only=False), dtype=bool)
+    order = np.argsort(codes, kind="mergesort")
+    codes = codes[order]
+    day_num = np.asarray(day_num, dtype=np.int32)[order]
+    flags = np.zeros(len(order), dtype=np.uint8)
+    flags[is_st[order]] |= np.uint8(1)
+    flags[trading[order]] |= np.uint8(2)
+    packed = {}
+    if len(codes):
+        change = np.flatnonzero(codes[1:] != codes[:-1]) + 1
+        starts = np.concatenate((np.array([0], dtype=int), change))
+        ends = np.concatenate((change, np.array([len(codes)], dtype=int)))
+        for start, end in zip(starts, ends):
+            symbol = str(codes[start])
+            if not symbol:
+                continue
+            packed[symbol] = (day_num[start:end].copy(), flags[start:end].copy())
+    _BULK_CACHE[key] = (stamp, packed)
+    return packed
 
 
 def _bulk_watermark(cache_dir: Path) -> date | None:
