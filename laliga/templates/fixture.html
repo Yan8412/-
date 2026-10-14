@@ -11,7 +11,7 @@
   <p class="muted">期望进球 全场 {{ '%.2f'|format(item.expected_goals_ft.home) }}-{{ '%.2f'|format(item.expected_goals_ft.away) }}，半场 {{ '%.2f'|format(item.expected_goals_ht.home) }}-{{ '%.2f'|format(item.expected_goals_ht.away) }}。绿色格子是全场概率最高的三个比分。</p>
   {% elif match is not none %}
   <h2>{{ match.home_team_name }} 对 {{ match.away_team_name }}</h2>
-  <p class="empty">这场比赛不在最近一次预测里，所以没有赛前概率表。最近一次预测里的比赛才会带完整比分分布。</p>
+  <p class="empty">这场比赛不在最近一次预测里，所以没有赛前概率表。最近一次预测里的比赛才会带完整比分分布。开球前存档的预测在<a href="{{ url_for('history_page') }}">历史记录</a>里。</p>
   {% endif %}
   {% if actual %}
   <p>本地记录的全场比分：{{ actual }}。若这场比赛已经用于训练，上面的分布不能当作赛前预测。</p>

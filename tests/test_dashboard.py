@@ -14,6 +14,7 @@ import pytest
 from playwright.sync_api import Page, expect
 from werkzeug.serving import make_server
 
+from laliga.archive import PredictionArchive
 from laliga.webapp import DEMO_FETCH_MESSAGE, create_app
 
 EXTERNAL = (
@@ -21,7 +22,7 @@ EXTERNAL = (
     "https://docs.sportmonks.com/v3/tutorials-and-guides/tutorials/includes/scores",
     "https://github.com/Yan8412/-",
 )
-NAV = ("操作台", "预测结果", "回测结果", "数据状态")
+NAV = ("操作台", "预测结果", "历史记录", "回测结果", "数据状态")
 JOB_WAIT_MS = 300_000
 
 
@@ -89,6 +90,11 @@ def test_empty_dashboard_every_control_and_external_link(tmp_path: Path, page: P
         expect(page.locator("[role=alert]")).to_contain_text("没有完场")
         _click_nav(page, "预测结果")
         expect(page.get_by_text("还没有预测")).to_be_visible()
+        _click_nav(page, "历史记录")
+        expect(page.get_by_text("还没有开球后的存档预测")).to_be_visible()
+        expect(page.get_by_text("还没有回测重建")).to_be_visible()
+        _submit(page, "回测重建本赛季")
+        expect(page.locator("[role=alert]")).to_contain_text("没有完场")
         _click_nav(page, "回测结果")
         expect(page.get_by_text("还没有回测")).to_be_visible()
         _click_nav(page, "数据状态")
@@ -115,6 +121,8 @@ def test_empty_dashboard_every_control_and_external_link(tmp_path: Path, page: P
             ("/predictions.json", "预测 JSON"),
             ("/backtest.csv", "回测 CSV"),
             ("/backtest.json", "回测 JSON"),
+            ("/history.csv", "历史记录 CSV"),
+            ("/history.json", "历史记录 JSON"),
         ):
             missing = page.goto(app.base + path)
             assert missing is not None and missing.status == 404
@@ -257,6 +265,20 @@ def test_mocked_sportmonks_pipeline(tmp_path: Path, page: Page, monkeypatch: pyt
         assert payload["items"][0]["ft_matrix"]
         assert abs(sum(payload["items"][0]["ft"].values()) - 1) < 1e-6
 
+        archived = PredictionArchive(tmp_path / "live").live_records()
+        assert {record["fixture_id"] for record in archived} == {item["fixture_id"] for item in payload["items"]}
+        assert all(record["source"] == "live" for record in archived)
+        _click_nav(page, "历史记录")
+        expect(page.get_by_text("还没有开球后的存档预测")).to_be_visible()
+        page.locator("#backfill-form input[name=min_train]").fill("18")
+        _submit(page, "回测重建本赛季", timeout=JOB_WAIT_MS)
+        expect(page.locator("#log")).to_contain_text("不是当时的实时预测")
+        page.locator("#job-result").click()
+        expect(page.get_by_role("heading", name="回测重建（不是实时预测）")).to_be_visible()
+        assert page.locator("#reconstruction-history tbody tr").count() > 0
+        expect(page.locator("#live-history")).to_have_count(0)
+        _assert_no_dead_links(page)
+
         _click_nav(page, "操作台")
         page.locator("input[name=start]").fill(day)
         page.locator("input[name=end]").fill(day)
@@ -336,6 +358,92 @@ def test_demo_mode_is_labelled_and_refuses_network(tmp_path: Path, page: Page, m
         _download_json(page, "下载预测 JSON")
     finally:
         app.close()
+
+
+def _seed_archived_round(data_dir: Path) -> tuple[list[dict], dict]:
+    """Real pipeline on the synthetic schedule: archive the last played round as if predicted the day before."""
+
+    import pandas as pd
+
+    from laliga.config import ModelConfig
+    from laliga.data.parse import fixtures_to_frame
+    from laliga.data.store import MatchStore
+    from laliga.model.service import fit_models
+    from laliga.synthetic import generate_synthetic_fixtures
+
+    frame = fixtures_to_frame(generate_synthetic_fixtures(seed=11))
+    store = MatchStore(data_dir)
+    store.replace(frame)
+    finished = frame[frame["status"] == "finished"]
+    last_day = finished["starting_at"].dt.floor("D").max()
+    target = finished[finished["starting_at"].dt.floor("D") == last_day]
+    model = fit_models(frame, pd.Timestamp(last_day), ModelConfig(max_iter=40, min_ht_matches=12))
+    predictions = [model.predict_row(row) for _, row in target.iterrows()]
+    PredictionArchive(data_dir).append(
+        predictions,
+        model_version="test",
+        origin="test",
+        generated_at=pd.Timestamp(last_day) - pd.Timedelta(hours=12),
+    )
+    results = {int(row["fixture_id"]): f"{int(row['home_goals_ft'])}-{int(row['away_goals_ft'])}" for _, row in target.iterrows()}
+    return [item.to_dict() for item in predictions], results
+
+
+def test_history_page_lists_archived_predictions_against_results(tmp_path: Path, page: Page, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SPORTMONKS_API_TOKEN", raising=False)
+    monkeypatch.delenv("SPORTMONKS_API_BASE", raising=False)
+    predictions, results = _seed_archived_round(tmp_path / "seeded")
+    app = RunningApp(tmp_path / "seeded")
+    try:
+        page.goto(app.base + "/")
+        _click_nav(page, "历史记录")
+        expect(page.get_by_role("heading", name="历史记录")).to_be_visible()
+        expect(page.locator(".demo-banner")).to_have_count(0)
+        summary = page.locator("#live-section table.summary")
+        expect(summary).to_contain_text("全场胜平负命中率")
+        expect(summary).to_contain_text("永远猜主胜")
+        expect(summary).to_contain_text("历史频率基准")
+        expect(summary).to_contain_text("实际比分落在前三")
+        rows = page.locator("#live-history tbody tr")
+        expect(rows).to_have_count(len(predictions))
+        text = page.locator("#live-history").inner_text()
+        for score in results.values():
+            assert score in text
+        marks = page.locator("#live-history td.mark").all_inner_texts()
+        assert marks and set(marks) <= {"命中", "未中", "—"}
+        _assert_no_dead_links(page)
+
+        csv_text = _download_contains(page, "下载历史 CSV", "ft_hit")
+        assert "live" in csv_text and "backtest_reconstruction" not in csv_text
+        document = _download_json(page, "下载历史 JSON")
+        live = document["live"]
+        assert live["summary"]["n_finished"] == len(predictions)
+        assert {row["fixture_id"] for row in live["rows"]} == set(results)
+        for row in live["rows"]:
+            assert row["actual_ft"] == results[row["fixture_id"]]
+            assert row["baseline"]["n_matches"] > 0
+        assert document["backtest_reconstruction"]["rows"] == []
+
+        page.locator("#backfill-form input[name=min_train]").fill("18")
+        _submit(page, "回测重建本赛季", timeout=JOB_WAIT_MS)
+        page.locator("#job-result").click()
+        expect(page.locator("#reconstruction-section table.summary")).to_contain_text("回测重建")
+        assert page.locator("#reconstruction-history tbody tr").count() > len(predictions)
+        expect(page.locator("#live-history tbody tr")).to_have_count(len(predictions))
+        page.locator("#live-history tbody tr").first.locator("a").first.click()
+        expect(page.locator("main")).to_contain_text("对")
+    finally:
+        app.close()
+
+
+def test_predictions_page_reads_a_list_format_latest_json(tmp_path: Path) -> None:
+    predictions, _ = _seed_archived_round(tmp_path)
+    (tmp_path / "predictions").mkdir(exist_ok=True)
+    (tmp_path / "predictions" / "latest.json").write_text(json.dumps(predictions), encoding="utf-8")
+    client = create_app(tmp_path).test_client()
+    response = client.get("/predictions")
+    assert response.status_code == 200
+    assert predictions[0]["home_team"] in response.get_data(as_text=True)
 
 
 def test_finished_job_title_and_singapore_clock() -> None:
