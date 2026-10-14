@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -273,6 +273,7 @@ class AvailabilityReport:
     recommend_default: bool
     recommendation: str
     notes: list[str]
+    rows: list[dict] = field(default_factory=list, repr=False)
 
     def to_dict(self) -> dict:
         return {
@@ -469,6 +470,7 @@ def _report(rows, folds, first_day, last_day, min_train, path, min_fit_rows) -> 
         recommend_default=recommend,
         recommendation=recommendation,
         notes=notes,
+        rows=rows,
     )
 
 
