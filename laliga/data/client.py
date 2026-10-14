@@ -98,10 +98,13 @@ class SportMonksClient:
         self._last_request_at: float | None = None
         self._session: requests.Session | None = None
 
-    def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def get(self, path: str, params: dict[str, Any] | None = None, *, refresh: bool | None = None) -> dict[str, Any]:
+        """``refresh=None`` follows the client setting; True or False overrides it for this call."""
+
         query = _clean_params(params)
         cache_path = self.cache_dir / f"{_cache_key(path, query)}.json"
-        if not self.refresh and cache_path.exists():
+        live = self.refresh if refresh is None else refresh
+        if not live and cache_path.exists():
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
             body = cached.get("body")
             if isinstance(body, dict):
@@ -111,7 +114,9 @@ class SportMonksClient:
         self._write_cache(cache_path, path, query, body)
         return body
 
-    def paginate(self, path: str, params: dict[str, Any] | None = None) -> Iterator[dict[str, Any]]:
+    def paginate(
+        self, path: str, params: dict[str, Any] | None = None, *, refresh: bool | None = None
+    ) -> Iterator[dict[str, Any]]:
         """Yield every row in ``data``, following cursor or page pagination."""
 
         original = _clean_params(params)
@@ -121,7 +126,7 @@ class SportMonksClient:
         seen: set[tuple[str, str]] = set()
         pages = 0
         while True:
-            payload = self.get(next_path, next_params)
+            payload = self.get(next_path, next_params, refresh=refresh)
             data = payload.get("data", [])
             if isinstance(data, dict):
                 yield data
