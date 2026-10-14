@@ -140,7 +140,7 @@ def format_history(report: dict, *, limit: int = 20) -> str:
         rows.append(["全场对数损失", _format_optional(model["ft_log_loss"]), "—", _format_optional(freq["ft_log_loss"])])
         rows.append(["全场 RPS", _format_optional(model["ft_rps"]), "—", _format_optional(freq["ft_rps"])])
         lines.append(_table(rows))
-        recent = [row for row in section["rows"]][-limit:]
+        recent = section["rows"][-limit:] if limit > 0 else []
         table = [["开球(UTC)", "主队", "客队", "全场预测", "前三比分", "赛果", "全场", "半场", "前三"]]
         for row in reversed(recent):
             pick = max(("home", "draw", "away"), key=lambda side: row["ft"][side])
