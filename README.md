@@ -105,10 +105,11 @@ python -m laliga web
 
 点下去之后会进入任务页，日志会往下长。成功时出现「查看数据状态 / 查看回测 / 查看预测」。失败时红字写出原因，例如没设 `SPORTMONKS_API_TOKEN`、HTTP 401、订阅不含西甲（HTTP 403，免费计划不含联赛 564）、HTTP 429 限流。不会静默失败，也不会在失败时填上假比赛。
 
-四个站内页面：
+五个站内页面：
 
 - **操作台**：上面这些按钮，以及当前缓存了多少场比赛
 - **预测结果**：开球时间同时给出 UTC 和新加坡时间（Asia/Singapore，UTC+8）、主客队、全场胜平负、半场胜平负、概率最高的三个比分。点球队名进入该场的完整比分概率表
+- **历史记录**：开球前存档的预测和实际比分对照，累计命中率，和「永远猜主胜」「历史频率基准」比较；另有单独标注的「回测重建」
 - **回测结果**：模型和历史频率基准的对数损失、Brier、命中率、前三比分命中率
 - **数据状态**：接口返回的赛季清单、本地比赛表里的赛季和场次、原始响应缓存文件数、上次训练时间
 
@@ -151,7 +152,7 @@ python -m laliga demo
 python -m laliga fetch --seasons 3
 ```
 
-再次运行会走缓存，并把新抓到的比赛按 `fixture_id` 合并进 `data/processed/matches.csv`。
+再次运行时，已经踢完的赛季走缓存；联赛赛季清单和当前（未结束）赛季每次都重新请求，所以每天的 `fetch` 能拿到新赛果。新抓到的比赛按 `fixture_id` 合并进 `data/processed/matches.csv`。
 
 ```bash
 python -m laliga fetch --seasons 3 --refresh    # 忽略原始响应缓存，重新请求
@@ -296,7 +297,59 @@ python -m laliga predict --from 2026-09-26 --to 2026-10-05 \
 
 本地没有这段赛程、并且环境里有 token 时，会自动调用日期区间接口补齐（`--refresh` 则强制重拉）。只预测状态为未开赛的比赛。
 
-终端表格的概率是百分数，开球时间是 **UTC**（北京时间加 8 小时）。CSV / JSON 里的概率是 0 到 1 的小数，三项之和为 1。JSON 里还有期望进球 `expected_goals_ft` / `expected_goals_ht`。
+终端表格的概率是百分数，开球时间是 **UTC**（北京时间加 8 小时）。CSV / JSON 里的概率是 0 到 1 的小数，三项之和为 1。JSON 里还有期望进球 `expected_goals_ft` / `expected_goals_ht`。`--json` 的字段（每日脚本写的 `latest_next.json`）不会变，写入时先写临时文件再改名。`--publish` 另外写操作台读的 `predictions/latest.json` 和 `latest.csv`。
+
+### 预测存档和历史记录
+
+每次 `predict`（以及操作台的两个预测按钮）都会给每场比赛追加一行到 `data/archive/predictions.jsonl`：fixture id、开球 UTC、主客队、全场和半场胜平负、前三比分和概率、期望进球、模型版本、生成时间。文件只追加，不改写。生成时间不早于开球时间的预测会被拒绝，比赛表里已经不是未开赛状态的比赛也会被拒绝。临时看一眼、不想存档时加 `--no-archive`。
+
+同一场比赛开球前生成过多次时，历史记录用开球前**最后一次**，也就是当时最后能看到的那组数字。赛果不写进存档，每次从 `matches.csv` 读取再对照：
+
+- 全场胜平负命中：概率最高的一项等于全场结果
+- 半场胜平负命中：同上，用半场比分；没有半场比分时不计
+- 前三比分命中：全场比分在预测的三个比分里
+
+对照的基准：永远猜主胜；历史频率基准（只用这次预测之前的完场比赛，胜平负按频率给概率，前三比分是那时最常见的三个比分）。还给出全场对数损失和 RPS。延期或取消的比赛单列，不计入命中率。
+
+```bash
+python -m laliga history                     # 终端汇总和最近 20 场
+python -m laliga history --json data/predictions/history.json
+python -m laliga backfill-archive            # 可选：回测重建本赛季已赛比赛
+```
+
+`backfill-archive` 给存档开始之前已经踢完的本赛季比赛补算：每个比赛日只用当天 00:00 UTC 之前的完场比赛重新拟合，和 `backtest` 同一个切法。结果写到单独的 `data/archive/backtest_reconstruction.jsonl`，标成「回测重建」，单独统计，不并入实时命中率；再运行会覆盖上一次重建。操作台的「历史记录」页显示两部分，并有「回测重建本赛季」按钮和 CSV / JSON 下载。
+
+### 每日更新和新鲜度检查
+
+`auto_update.ps1`（仓库根目录）是笔记本上的每日任务：`fetch` → `check-freshness` → `train` → `predict --next`（写 `latest_next.json`，并存档）→ `history` → `backtest`，每次运行在 `logs/auto_update.log` 追加一行汇总。部署和验证步骤见 [docs/DEPLOY_WINDOWS.md](docs/DEPLOY_WINDOWS.md)。
+
+```bash
+python -m laliga check-freshness        # 退出码 0 = OK，2 = STALE
+python check_freshness.py               # 同一个检查，给脚本按路径调用
+LALIGA_FRESHNESS_NOW=2026-10-20T20:00:00Z python -m laliga check-freshness
+python -m laliga doctor                 # 部署后自检
+```
+
+STALE 的条件：某场比赛开球超过 48 小时仍是未开赛（或卡在进行中状态）；或者最近一场完场已超过 10 天、并且一场未开赛比赛都没有。最近完场超过 10 天但下一轮已经排出（国家队比赛日）是 OK；上个赛季已经踢完（无未开赛比赛且完场接近 380 场，或赛季清单标记已结束）、新赛程还没公布（休赛期）也是 OK。延期、取消的比赛不算 STALE。脚本遇到 STALE 会用 `--refresh` 再抓一次；仍然 STALE 就退出码 2，不重训，也不覆盖上一次的预测文件。
+
+### 伤停和首发（可选，默认关闭）
+
+SportMonks 文档写明 `lineups`（首发 type 11、替补 type 12）和 `sidelined`（伤病、停赛、存疑）包含在所有基础计划里，Starter 也有，不需要附加包。正式首发大约开球前 1 小时才公布；更早的预测首发需要 Expected Lineups 附加包，这里不用。开发时没有 token，接口覆盖率要在笔记本上用真实 token 确认。
+
+```bash
+python -m laliga fetch-availability     # GET /fixtures/multi/{ids}?include=lineups;sidelined.sideline;metadata
+python -m laliga compare-availability --min-train 320
+python -m laliga predict --next --availability
+```
+
+特征只用开球前能知道的信息。球员的「首发占比」是球队在更早日期最近 10 场联赛里他首发的比例。「缺阵主力」是这场伤停名单上球员首发占比之和：伤病和停赛按 1 计，存疑按 0.5 计；开始日期晚于比赛日、或结束日期早于比赛日的记录不算。长期伤员首发占比接近 0，不会再被重复扣分。调整只有两个系数：
+
+- 主队期望进球 × exp(−a × 主队缺阵主力 + d × 客队缺阵主力)，客队对称
+- 半场期望进球乘同样的系数，ρ 和比分表不变
+
+`compare-availability` 用和 `backtest` 相同的严格走步：每个评测日的 Dixon–Coles 只用之前的完场比赛，a、d 只用更早评测日的样本外比赛拟合，累计不到 150 场时不调整。输出历史频率基准、Dixon–Coles、加伤停调整、以及加首发缺口调整的全场对数损失、RPS、Brier、命中率、前三比分命中率和场次，配对 bootstrap 区间，写到 `data/predictions/availability_comparison.json`，系数写到 `data/models/availability.json`。首发缺口用的是正式首发，每日脚本运行时通常还没有，这一行只说明开球前 1 小时再跑一次的价值。历史伤停记录是事后读取的，接口没有说明是不是赛前录入，历史评估可能偏乐观。
+
+只有当伤停调整在样本外明显更好时（n ≥ 300，对数损失之差和 RPS 之差的 95% 区间都在 0 以下），`recommend_default` 才是 true；这时再给每日任务加 `-Availability`。否则生产仍然是 Dixon–Coles。
 
 常用参数：
 
@@ -332,7 +385,7 @@ python -m laliga predict --from 2026-09-26 --to 2026-10-05 \
 pytest -q
 ```
 
-测试不访问真实的 SportMonks，也不下载 football-data。解析器用文档里的比分结构（含半场、90 分钟、加时里 `CURRENT` 与 `2ND_HALF` 的差别）；HTTP 客户端用假传输检查分页、429、限流和“缓存里不能出现 token”；模型用合成赛程做拟合、梯度核对、未来比赛不能泄漏进训练，以及走步回测对历史频率基准的比较。XGBoost 对照在合成赛程上和同一次 Dixon–Coles 走步对齐，并检查本场比分、本场 xG、同一天早场和未来比赛不会进入赛前特征。混合权重的测试检查当天和未来的结果不会进入当天的权重或去水位方法的选择，并确认事后最优权重标成样本内。队名对照和历史合并用一份写在测试里的 CSV。`demo` / `predict --next` 也在子进程里离线跑通。
+测试不访问真实的 SportMonks，也不下载 football-data。解析器用文档里的比分结构（含半场、90 分钟、加时里 `CURRENT` 与 `2ND_HALF` 的差别）；HTTP 客户端用假传输检查分页、429、限流和“缓存里不能出现 token”；模型用合成赛程做拟合、梯度核对、未来比赛不能泄漏进训练，以及走步回测对历史频率基准的比较。XGBoost 对照在合成赛程上和同一次 Dixon–Coles 走步对齐，并检查本场比分、本场 xG、同一天早场和未来比赛不会进入赛前特征。混合权重的测试检查当天和未来的结果不会进入当天的权重或去水位方法的选择，并确认事后最优权重标成样本内。队名对照和历史合并用一份写在测试里的 CSV。`demo` / `predict --next` 也在子进程里离线跑通，并检查 `latest_next.json` 的字段没有变。预测存档的测试检查开球后不能写入、开球前多次生成时取最后一次、比分改期提前时的处理、命中和基准只用预测之前的比赛。新鲜度检查用 `LALIGA_FRESHNESS_NOW` 固定时钟。伤停调整用一份测试里生成的阵容和伤停数据，检查系数能找回真实效应、没有效应时接近 0，以及最后一天的结果不影响更早日期的概率。
 
 操作台测试用 Playwright 打开真实页面，点每一个按钮，并跟着每一个站内链接和页脚外链走一遍。没有 token 时断言空状态和明确报错。带 token 的用例把 `SPORTMONKS_API_BASE` 指到本机的一个 HTTP 服务，响应外形与 SportMonks v3 相同（`data` / `pagination` / `rate_limit`，以及 401、403、429），真正的 `requests` 客户端会去请求它。日常使用不要设置 `SPORTMONKS_API_BASE`。首次跑这组测试需要：
 
@@ -350,7 +403,12 @@ tests/             离线测试，含操作台点击测试和 SportMonks 外形�
 data/cache/        原始 API 响应，以及 football-data 的 SP1 CSV（git 忽略）
 data/processed/    matches.csv、seasons.json，以及 import-history 写出的 history.csv
 data/models/       dixon_coles.json
-data/predictions/  预测、回测、model_comparison.json，以及长历史的 model_comparison_history.json
+data/predictions/  预测（latest_next.json、latest.json）、回测、history.json、model_comparison.json，以及长历史的 model_comparison_history.json
+data/archive/      predictions.jsonl（只追加的开球前预测存档）、backtest_reconstruction.jsonl（回测重建）
+data/processed/    另有 fetch-availability 写的 lineups.csv、sidelined.csv、availability_fixtures.csv
+docs/              DEPLOY_WINDOWS.md：更新 D:\laliga-predictor 的步骤
+auto_update.ps1    每日任务（Windows PowerShell）
+check_freshness.py 新鲜度检查（同 check-freshness）
 data/demo/         demo 命令的合成数据
 data/web-demo/     python -m laliga web --demo 的合成数据
 ```
