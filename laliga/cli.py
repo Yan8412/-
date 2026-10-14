@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from laliga.archive import PredictionArchive, history_report, reconstruct_season
 from laliga.config import DEFAULT_MIN_TRAIN_MATCHES, DEFAULT_SEASONS, DEFAULT_XI, ModelConfig, api_token, project_data_dir
 from laliga.data.client import SportMonksError, open_client
 from laliga.data.football_data import HistoryError, format_history_build, import_history, load_history
@@ -19,14 +20,17 @@ from laliga.data.markets import fetch_stored_markets, format_market_fetch
 from laliga.data.parse import fixtures_to_frame
 from laliga.data.store import MatchStore
 from laliga.model.dixon_coles import FitError
-from laliga.model.service import ScorelineModel, fit_models, model_is_fresh
+from laliga.model.service import ScorelineModel, fit_models
+from laliga.pipeline import archive_scored, dashboard_items, score_fixtures, write_dashboard_latest, write_latest_next
 from laliga.report import (
+    format_availability_report,
     format_backtest,
     format_comparison,
+    format_history,
     format_predictions,
     format_team_table,
+    latest_next_problem,
     write_predictions_csv,
-    write_predictions_json,
 )
 from laliga.schedule import scheduled_between, select_next_matchday
 from laliga.synthetic import generate_synthetic_fixtures
@@ -154,8 +158,69 @@ def build_parser() -> argparse.ArgumentParser:
     predict.add_argument("--refresh", action="store_true", help="预测前向 API 刷新这段赛程")
     predict.add_argument("--refit", action="store_true", help="即使已有模型文件也按赛前数据重新拟合")
     predict.add_argument("--csv", type=str, default="", help="把预测写入 CSV")
-    predict.add_argument("--json", type=str, default="", help="把预测写入 JSON")
+    predict.add_argument("--json", type=str, default="", help="把预测写入 JSON（每日脚本的 latest_next.json 用这个，字段不变）")
+    predict.add_argument(
+        "--publish",
+        action="store_true",
+        help="同时写操作台读取的 predictions/latest.json 和 latest.csv（含比分矩阵）",
+    )
+    predict.add_argument("--no-archive", action="store_true", help="不写入 archive/predictions.jsonl（临时查看时用）")
+    predict.add_argument(
+        "--availability",
+        action="store_true",
+        help="按伤停/首发调整期望进球。默认关闭；需要先 fetch-availability 和 compare-availability",
+    )
     predict.set_defaults(func=cmd_predict)
+
+    history_cmd = sub.add_parser("history", help="开球前存档的预测与赛果对照，以及基准命中率")
+    _add_data_dir(history_cmd)
+    history_cmd.add_argument("--json", type=str, default="", help="把完整历史写入 JSON")
+    history_cmd.add_argument("--limit", type=int, default=20, help="终端最多显示最近多少场（默认 20）")
+    history_cmd.set_defaults(func=cmd_history)
+
+    backfill = sub.add_parser(
+        "backfill-archive",
+        help="用严格时间顺序的走步回测重建本赛季已赛比赛（标为回测重建，不算实时预测）",
+    )
+    _add_model_args(backfill)
+    backfill.add_argument("--season-id", type=int, default=None, help="赛季 id，默认是比赛表里最新的赛季")
+    backfill.add_argument(
+        "--min-train",
+        type=int,
+        default=DEFAULT_MIN_TRAIN_MATCHES,
+        help=f"每个比赛日之前至少要有多少场完场比赛（默认 {DEFAULT_MIN_TRAIN_MATCHES}）",
+    )
+    backfill.set_defaults(func=cmd_backfill_archive)
+
+    fresh = sub.add_parser("check-freshness", help="每日更新前的数据新鲜度检查：正常退出码 0，STALE 退出码 2")
+    _add_data_dir(fresh)
+    fresh.add_argument("--now", type=str, default="", help="用这个 UTC 时间代替当前时间（也可用环境变量 LALIGA_FRESHNESS_NOW）")
+    fresh.add_argument("--json", action="store_true", help="输出 JSON")
+    fresh.set_defaults(func=cmd_check_freshness)
+
+    doctor = sub.add_parser("doctor", help="部署后快速自检：数据、模型、预测文件格式、存档、新鲜度")
+    _add_data_dir(doctor)
+    doctor.set_defaults(func=cmd_doctor)
+
+    avail = sub.add_parser("fetch-availability", help="为已存比赛回填首发阵容和伤停（不进每日更新，除非打开伤停开关）")
+    _add_data_dir(avail)
+    avail.add_argument("--refresh", action="store_true", help="完场比赛也重新请求")
+    avail.add_argument("--days-ahead", type=int, default=14, help="未来多少天内的未开赛比赛每次重新请求（默认 14）")
+    avail.set_defaults(func=cmd_fetch_availability)
+
+    avail_compare = sub.add_parser(
+        "compare-availability",
+        help="走步评估伤停/首发调整，对比 Dixon–Coles 与历史频率基准，并保存系数",
+    )
+    _add_model_args(avail_compare)
+    avail_compare.add_argument(
+        "--min-train",
+        type=int,
+        default=DEFAULT_MIN_TRAIN_MATCHES,
+        help=f"每个评测日之前至少要有多少场完场比赛（默认 {DEFAULT_MIN_TRAIN_MATCHES}）",
+    )
+    avail_compare.add_argument("--output", type=str, default="", help="默认 predictions/availability_comparison.json")
+    avail_compare.set_defaults(func=cmd_compare_availability)
 
     demo = sub.add_parser("demo", help="用合成数据离线跑一遍回测和下一轮预测（不需要 API token）")
     demo.add_argument("--data-dir", default="", help="合成数据目录，默认是 <数据目录>/demo")
@@ -310,16 +375,182 @@ def cmd_predict(args: argparse.Namespace) -> int:
         print(note, file=sys.stderr)
     history = store.load()
     config = _config(args, min_train=4)
-    predictions = _predict(history, fixtures, config, store, refit=args.refit)
+    adjuster = _availability_adjuster(store) if args.availability else None
+    scored = score_fixtures(
+        history,
+        fixtures,
+        config,
+        store,
+        refit=args.refit,
+        adjuster=adjuster,
+        notify=lambda text: print(text, file=sys.stderr),
+    )
+    predictions = [item.prediction for item in scored]
     if args.csv:
         write_predictions_csv(predictions, Path(args.csv))
     if args.json:
-        write_predictions_json(predictions, Path(args.json))
+        write_latest_next(Path(args.json), predictions)
+    if args.publish:
+        label = "下一轮" if args.next else f"{args.start.isoformat()} 至 {args.end.isoformat()}"
+        write_dashboard_latest(store, dashboard_items(scored), label=label, note=note)
+    archived = None
+    if not args.no_archive:
+        origin = "cli:predict --next" if args.next else "cli:predict --from/--to"
+        archived = archive_scored(store, scored, history, origin=origin)
     print(format_predictions(predictions))
     if args.csv:
         print(f"\nCSV 已写入 {args.csv}")
     if args.json:
         print(f"JSON 已写入 {args.json}")
+    if args.publish:
+        print(f"操作台预测已写入 {store.predictions_dir / 'latest.json'}")
+    if archived is not None:
+        print(f"预测存档：写入 {archived.accepted} 场，拒绝 {len(archived.refused)} 场（已开球或不是未开赛）。")
+    if adjuster is not None:
+        used = sum(1 for item in scored if item.availability and item.availability.get("used"))
+        print(f"伤停/首发调整：{used}/{len(scored)} 场生效。其余场次等于 Dixon–Coles。")
+    return 0
+
+
+def _availability_adjuster(store: MatchStore):
+    from laliga.data.availability import AvailabilityStore
+    from laliga.model.availability import AvailabilityFeatures, load_coefficients, make_adjuster
+
+    coefficients = load_coefficients(store.root)
+    if coefficients is None:
+        raise CliError(
+            "没有伤停系数文件 models/availability.json。先运行 "
+            "`python -m laliga fetch-availability` 和 `python -m laliga compare-availability`。",
+            exit_code=2,
+        )
+    lineups, sidelined, fetched = AvailabilityStore(store.root).load()
+    return make_adjuster(AvailabilityFeatures(store.load(), lineups, sidelined, fetched), coefficients)
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    store = _store(args)
+    report = history_report(store.root, store.load())
+    if args.json:
+        _write_utf8(Path(args.json), json.dumps(report, ensure_ascii=False, indent=2))
+    print(format_history(report, limit=args.limit))
+    if args.json:
+        print(f"\n历史 JSON 已写入 {args.json}")
+    return 0
+
+
+def cmd_backfill_archive(args: argparse.Namespace) -> int:
+    store = _store(args)
+    history = _require_history(store)
+    config = _config(args, min_train=args.min_train)
+    built = reconstruct_season(history, config, season_id=args.season_id)
+    if not built.records:
+        raise CliError(
+            f"赛季 {built.season_id} 没有可以重建的完场比赛（跳过 {built.skipped_days} 个训练样本不足的比赛日）。"
+            "可以降低 --min-train。",
+            exit_code=1,
+        )
+    PredictionArchive(store.root).replace_reconstruction(built.records)
+    print(
+        f"回测重建：赛季 {built.season_id}，{len(built.records)} 场，{built.days} 个比赛日"
+        f"（跳过 {built.skipped_days} 个）。每个比赛日只用当天 00:00 UTC 之前的完场比赛。"
+    )
+    print(f"写入 {PredictionArchive(store.root).reconstruction_path}。这些是事后重建，不是当时的实时预测，单独统计。")
+    return 0
+
+
+def cmd_check_freshness(args: argparse.Namespace) -> int:
+    from laliga.freshness import check_freshness, resolve_now
+
+    store = _store(args)
+    try:
+        now = resolve_now(args.now or None)
+    except ValueError as exc:
+        raise CliError(str(exc), exit_code=1) from exc
+    seasons_doc = None
+    if store.seasons_path.exists():
+        seasons_doc = json.loads(store.seasons_path.read_text(encoding="utf-8"))
+    result = check_freshness(store.load(), now, seasons_doc=seasons_doc)
+    if args.json:
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(result.format())
+    return result.exit_code
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from laliga import __version__
+    from laliga.freshness import check_freshness, resolve_now
+
+    store = _store(args)
+    problems: list[str] = []
+    print(f"laliga {__version__}，Python {sys.version.split()[0]}")
+    print(f"数据目录：{store.root}")
+    frame = store.load()
+    finished = int((frame["status"] == "finished").sum()) if not frame.empty else 0
+    scheduled = int((frame["status"] == "scheduled").sum()) if not frame.empty else 0
+    print(f"比赛表：{len(frame)} 场（完场 {finished}，未开赛 {scheduled}）")
+    if frame.empty:
+        problems.append("比赛表是空的")
+    document = store.load_model_document()
+    if document:
+        try:
+            model = ScorelineModel.from_dict(document)
+            print(f"模型：训练截止 {model.ft.trained_through}，样本 {model.ft.n_matches} 场")
+        except (KeyError, TypeError, ValueError, FitError) as exc:
+            problems.append(f"模型文件无法读取：{exc}")
+    else:
+        print("模型：还没有 models/dixon_coles.json")
+    latest_next = store.predictions_dir / "latest_next.json"
+    if latest_next.exists():
+        issue = latest_next_problem(json.loads(latest_next.read_text(encoding="utf-8")))
+        if issue:
+            problems.append(f"latest_next.json 格式不对：{issue}")
+        else:
+            print("latest_next.json：字段完整")
+    else:
+        print("latest_next.json：还没有（每日脚本跑过一次后会出现）")
+    archive = PredictionArchive(store.root)
+    print(f"预测存档：实时 {len(archive.live_records())} 行，回测重建 {len(archive.reconstruction_records())} 行")
+    seasons_doc = json.loads(store.seasons_path.read_text(encoding="utf-8")) if store.seasons_path.exists() else None
+    fresh = check_freshness(frame, resolve_now(), seasons_doc=seasons_doc)
+    print(fresh.format())
+    for problem in problems:
+        print(f"问题：{problem}", file=sys.stderr)
+    if problems:
+        return 1
+    print("自检通过。" if not fresh.stale else "自检通过，但数据 STALE。")
+    return 0
+
+
+def cmd_fetch_availability(args: argparse.Namespace) -> int:
+    from laliga.data.availability import AvailabilityStore, fetch_availability, format_availability_fetch
+
+    store = _store(args)
+    if store.load().empty:
+        raise CliError("本地没有比赛。请先 `python -m laliga fetch`，再回填阵容和伤停。", exit_code=2)
+    client = _client(store, refresh=False)
+    result = fetch_availability(client, store, AvailabilityStore(store.root), force=args.refresh, days_ahead=args.days_ahead)
+    print(format_availability_fetch(result))
+    return 1 if result.denied else 0
+
+
+def cmd_compare_availability(args: argparse.Namespace) -> int:
+    from laliga.data.availability import AvailabilityStore
+    from laliga.model.availability import AvailabilityFeatures, compare_availability, save_coefficients
+
+    store = _store(args)
+    history = _require_history(store)
+    lineups, sidelined, fetched = AvailabilityStore(store.root).load()
+    if fetched.empty:
+        raise CliError("还没有阵容/伤停数据。先运行 `python -m laliga fetch-availability`。", exit_code=2)
+    config = _config(args, min_train=args.min_train)
+    report = compare_availability(history, AvailabilityFeatures(history, lineups, sidelined, fetched), config)
+    output = Path(args.output) if args.output else store.predictions_dir / "availability_comparison.json"
+    _write_utf8(output, json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    saved = save_coefficients(store.root, report)
+    print(format_availability_report(report))
+    print(f"\n评估 JSON 已写入 {output}")
+    print(f"系数已写入 {saved}（只有 predict --availability 会读它）")
     return 0
 
 
@@ -348,38 +579,6 @@ def cmd_demo(args: argparse.Namespace) -> int:
     print("下一轮合成比赛：")
     print(format_predictions(predictions))
     return 0
-
-
-def _predict(history, fixtures, config: ModelConfig, store: MatchStore, *, refit: bool):
-    saved = None
-    document = store.load_model_document()
-    if document and not refit:
-        try:
-            saved = ScorelineModel.from_dict(document)
-        except (KeyError, TypeError, ValueError, FitError) as exc:
-            logger.warning("已保存的模型无法读取，将重新拟合：%s", exc)
-            saved = None
-    eligible = history[~history["fixture_id"].isin(set(fixtures["fixture_id"].astype(int)))]
-    if saved is not None and model_is_fresh(saved, eligible, fixtures):
-        print("使用已保存的模型（训练截止日期不早于最近完场、且早于这些比赛）。", file=sys.stderr)
-        return [saved.predict_row(row) for _, row in fixtures.sort_values("starting_at").iterrows()]
-
-    print("按每场比赛开球日前的完场数据重新拟合。", file=sys.stderr)
-    predictions = []
-    previous: ScorelineModel | None = None
-    ordered = fixtures.sort_values(["starting_at", "fixture_id"])
-    for day, group in ordered.groupby(ordered["starting_at"].dt.floor("D"), sort=True):
-        model = fit_models(
-            eligible,
-            pd.Timestamp(day),
-            config,
-            initial_ft=None if previous is None else previous.ft,
-            initial_ht=None if previous is None else previous.ht,
-        )
-        previous = model
-        for _, row in group.iterrows():
-            predictions.append(model.predict_row(row))
-    return predictions
 
 
 def _load_next(store: MatchStore, refresh: bool):
