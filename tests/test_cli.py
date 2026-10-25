@@ -313,3 +313,113 @@ def test_help_on_a_gbk_pipe_is_utf8(monkeypatch):
     compare_stdout.flush()
     compare_text = compare_buffer.getvalue().decode("utf-8")
     assert "Dixon–Coles" in compare_text
+
+
+NOTIFIER_KEYS = {
+    "fixture_id",
+    "starting_at",
+    "season_id",
+    "season_name",
+    "round_name",
+    "home_team_id",
+    "home_team",
+    "away_team_id",
+    "away_team",
+    "ft",
+    "ht",
+    "top_scores",
+    "expected_goals_ft",
+    "expected_goals_ht",
+}
+
+
+def _predict_next(tmp_path: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+    return _run(
+        [sys.executable, "-m", "laliga", "predict", "--data-dir", str(tmp_path), "--next", "--max-iter", "40", *extra],
+        tmp_path,
+    )
+
+
+def test_daily_predict_keeps_latest_next_format_publishes_and_archives(tmp_path):
+    from laliga.archive import PredictionArchive
+    from laliga.report import latest_next_problem
+
+    MatchStore(tmp_path).replace(fixtures_to_frame(generate_synthetic_fixtures(seed=7)))
+    latest_next = tmp_path / "predictions" / "latest_next.json"
+    result = _predict_next(tmp_path, "--json", str(latest_next), "--publish")
+    assert result.returncode == 0, result.stderr
+    assert "预测存档：写入 3 场" in result.stdout
+
+    payload = json.loads(latest_next.read_text(encoding="utf-8"))
+    assert isinstance(payload, list) and len(payload) == 3
+    assert latest_next_problem(payload) == ""
+    for item in payload:
+        assert set(item) == NOTIFIER_KEYS
+        assert item["starting_at"].endswith("+00:00")
+        assert set(item["ft"]) == set(item["ht"]) == {"home", "draw", "away"}
+        assert [set(score) for score in item["top_scores"]] == [{"home_goals", "away_goals", "probability"}] * 3
+        assert set(item["expected_goals_ft"]) == set(item["expected_goals_ht"]) == {"home", "away"}
+
+    dashboard = json.loads((tmp_path / "predictions" / "latest.json").read_text(encoding="utf-8"))
+    assert dashboard["label"] == "下一轮"
+    assert [item["fixture_id"] for item in dashboard["items"]] == [item["fixture_id"] for item in payload]
+    assert dashboard["items"][0]["ft_matrix"]
+    assert (tmp_path / "predictions" / "latest.csv").exists()
+
+    archive = PredictionArchive(tmp_path)
+    first = archive.live_path.read_bytes()
+    again = _predict_next(tmp_path, "--json", str(latest_next))
+    assert again.returncode == 0, again.stderr
+    assert archive.live_path.read_bytes().startswith(first)
+    records = archive.live_records()
+    assert len(records) == 6
+    assert {record["origin"] for record in records} == {"cli:predict --next"}
+    assert all(record["model_version"].startswith("laliga-") for record in records)
+
+    skipped = _predict_next(tmp_path, "--no-archive")
+    assert skipped.returncode == 0, skipped.stderr
+    assert len(archive.live_records()) == 6
+
+    history = _run([sys.executable, "-m", "laliga", "history", "--data-dir", str(tmp_path), "--json", str(tmp_path / "h.json")], tmp_path)
+    assert history.returncode == 0, history.stderr
+    assert "还没有开球后的存档预测" in history.stdout
+    assert json.loads((tmp_path / "h.json").read_text(encoding="utf-8"))["live"]["rows"] == []
+
+    doctor = _run([sys.executable, "-m", "laliga", "doctor", "--data-dir", str(tmp_path)], tmp_path)
+    assert doctor.returncode == 0, doctor.stderr
+    assert "latest_next.json：字段完整" in doctor.stdout
+    assert "实时 6 行" in doctor.stdout
+
+
+def test_doctor_flags_a_broken_latest_next(tmp_path):
+    MatchStore(tmp_path).replace(fixtures_to_frame(generate_synthetic_fixtures(seed=7)))
+    (tmp_path / "predictions").mkdir()
+    (tmp_path / "predictions" / "latest_next.json").write_text(json.dumps([{"home_team": "A"}]), encoding="utf-8")
+    doctor = _run([sys.executable, "-m", "laliga", "doctor", "--data-dir", str(tmp_path)], tmp_path)
+    assert doctor.returncode == 1
+    assert "latest_next.json 格式不对" in doctor.stderr
+
+
+def test_backfill_archive_writes_only_the_reconstruction_file(tmp_path):
+    from laliga.archive import PredictionArchive
+
+    MatchStore(tmp_path).replace(fixtures_to_frame(generate_synthetic_fixtures(seed=7)))
+    result = _run(
+        [sys.executable, "-m", "laliga", "backfill-archive", "--data-dir", str(tmp_path), "--min-train", "18", "--max-iter", "40"],
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "不是当时的实时预测" in result.stdout
+    archive = PredictionArchive(tmp_path)
+    assert not archive.live_path.exists()
+    records = archive.reconstruction_records()
+    assert records and {record["source"] for record in records} == {"backtest_reconstruction"}
+    history = _run([sys.executable, "-m", "laliga", "history", "--data-dir", str(tmp_path)], tmp_path)
+    assert "回测重建" in history.stdout
+
+
+def test_predict_with_availability_needs_the_evaluated_coefficients(tmp_path):
+    MatchStore(tmp_path).replace(fixtures_to_frame(generate_synthetic_fixtures(seed=7)))
+    result = _predict_next(tmp_path, "--availability")
+    assert result.returncode == 2
+    assert "compare-availability" in result.stderr

@@ -13,6 +13,7 @@ from laliga.model.dixon_coles import (
     FittedModel,
     fit_dixon_coles,
     outcome_probabilities,
+    score_matrix,
     top_scorelines,
 )
 
@@ -86,17 +87,46 @@ class Prediction:
         }
 
 
+@dataclass(frozen=True)
+class GoalMultipliers:
+    """Factors on the Dixon–Coles expected goals of each side. 1.0 leaves the model unchanged."""
+
+    home: float = 1.0
+    away: float = 1.0
+
+    @property
+    def neutral(self) -> bool:
+        return self.home == 1.0 and self.away == 1.0
+
+
 @dataclass
 class ScorelineModel:
     ft: FittedModel
     ht: FittedModel
     ht_source: str
 
-    def predict_row(self, row: pd.Series) -> Prediction:
+    def expected_goals(
+        self, home_id: int, away_id: int, multipliers: GoalMultipliers | None = None
+    ) -> tuple[tuple[float, float], tuple[float, float]]:
+        scale = multipliers or GoalMultipliers()
+        ft_home, ft_away = self.ft.expected_goals(home_id, away_id)
+        ht_home, ht_away = self.ht.expected_goals(home_id, away_id)
+        return (ft_home * scale.home, ft_away * scale.away), (ht_home * scale.home, ht_away * scale.away)
+
+    def matrices(self, home_id: int, away_id: int, multipliers: GoalMultipliers | None = None):
+        if multipliers is None or multipliers.neutral:
+            return self.ft.score_matrix(home_id, away_id), self.ht.score_matrix(home_id, away_id)
+        (ft_home, ft_away), (ht_home, ht_away) = self.expected_goals(home_id, away_id, multipliers)
+        return (
+            score_matrix(ft_home, ft_away, self.ft.rho, self.ft.max_goals),
+            score_matrix(ht_home, ht_away, self.ht.rho, self.ht.max_goals),
+        )
+
+    def predict_row(self, row: pd.Series, multipliers: GoalMultipliers | None = None) -> Prediction:
         home_id = int(row["home_team_id"])
         away_id = int(row["away_team_id"])
-        ft_matrix = self.ft.score_matrix(home_id, away_id)
-        ht_matrix = self.ht.score_matrix(home_id, away_id)
+        ft_matrix, ht_matrix = self.matrices(home_id, away_id, multipliers)
+        expected_ft, expected_ht = self.expected_goals(home_id, away_id, multipliers)
         ft_probs = outcome_probabilities(ft_matrix)
         ht_probs = outcome_probabilities(ht_matrix)
         kickoff = pd.Timestamp(row["starting_at"])
@@ -114,8 +144,8 @@ class ScorelineModel:
             ft=MarketProb(*ft_probs),
             ht=MarketProb(*ht_probs),
             top_scores=[ScoreProb(home, away, probability) for home, away, probability in top_scorelines(ft_matrix, 3)],
-            expected_goals_ft=self.ft.expected_goals(home_id, away_id),
-            expected_goals_ht=self.ht.expected_goals(home_id, away_id),
+            expected_goals_ft=expected_ft,
+            expected_goals_ht=expected_ht,
         )
 
     def to_dict(self) -> dict:

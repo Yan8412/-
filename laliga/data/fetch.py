@@ -19,10 +19,24 @@ logger = logging.getLogger(__name__)
 FIXTURE_INCLUDES = "participants;scores;state;round;season"
 
 
-def fetch_historical(client: SportMonksClient, store: MatchStore, *, seasons: int, replace: bool) -> pd.DataFrame:
-    """Fetch the most recent ``seasons`` La Liga seasons and store fixtures."""
+def fetch_historical(
+    client: SportMonksClient,
+    store: MatchStore,
+    *,
+    seasons: int,
+    replace: bool,
+    live_open_seasons: bool = True,
+) -> pd.DataFrame:
+    """Fetch the most recent ``seasons`` La Liga seasons and store fixtures.
 
-    league = _league_payload(client)
+    A finished season is served from the raw cache. With ``live_open_seasons``
+    the league list and every season that is current or not yet finished are
+    requested again, so a plain daily ``fetch`` picks up new results instead
+    of replaying the first cached copy of the current season.
+    """
+
+    live = True if live_open_seasons else None
+    league = _league_payload(client, refresh=live)
     chosen = select_seasons(league.get("seasons") or [], seasons)
     if not chosen:
         raise SportMonksError(
@@ -35,8 +49,9 @@ def fetch_historical(client: SportMonksClient, store: MatchStore, *, seasons: in
     for season in chosen:
         season_id = season.get("id")
         logger.info("抓取赛季 %s（id=%s）", season.get("name") or "", season_id)
+        open_season = live_open_seasons and season_is_open(season)
         try:
-            fixtures = list(fetch_season_fixtures(client, int(season_id)))
+            fixtures = list(fetch_season_fixtures(client, int(season_id), refresh=True if open_season else None))
         except SportMonksError as exc:
             if _is_empty_result(exc):
                 logger.warning("赛季 %s 没有比赛或当前订阅不可见：%s", season_id, exc)
@@ -105,7 +120,9 @@ def fetch_window(client: SportMonksClient, store: MatchStore, start: date, end: 
     return store.load()
 
 
-def fetch_season_fixtures(client: SportMonksClient, season_id: int) -> Iterator[dict[str, Any]]:
+def fetch_season_fixtures(
+    client: SportMonksClient, season_id: int, *, refresh: bool | None = None
+) -> Iterator[dict[str, Any]]:
     """Paginate ``GET /fixtures?filters=fixtureSeasons:{id}``."""
 
     params = {
@@ -113,7 +130,15 @@ def fetch_season_fixtures(client: SportMonksClient, season_id: int) -> Iterator[
         "filters": f"fixtureSeasons:{season_id}",
         "per_page": 50,
     }
-    return client.paginate("fixtures", params)
+    return client.paginate("fixtures", params, refresh=refresh)
+
+
+def season_is_open(season: dict[str, Any]) -> bool:
+    """A season whose fixtures can still change: current, pending, or not marked finished."""
+
+    if season.get("is_current") or season.get("pending"):
+        return True
+    return season.get("finished") is not True
 
 
 def select_seasons(seasons: Iterable[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -140,11 +165,12 @@ def iter_date_windows(start: date, end: date, max_inclusive_days: int = MAX_BETW
         cursor = stop + timedelta(days=1)
 
 
-def _league_payload(client: SportMonksClient) -> dict[str, Any]:
+def _league_payload(client: SportMonksClient, *, refresh: bool | None = None) -> dict[str, Any]:
     try:
         body = client.get(
             f"leagues/{LA_LIGA_LEAGUE_ID}",
             {"include": "seasons;currentSeason"},
+            refresh=refresh,
         )
     except SportMonksError as exc:
         if exc.status in (401, 403, 404) or "subscription" in str(exc).lower():

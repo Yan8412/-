@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}历史记录{% endblock %}
+{% macro summary_table(view, caption) %}
+  <div class="wrap">
+    <table class="summary">
+      <caption class="muted">{{ caption }}</caption>
+      <thead>
+        <tr><th>指标</th><th>模型</th><th>永远猜主胜</th><th>历史频率基准</th></tr>
+      </thead>
+      <tbody>
+        {% for label, model, home, freq in view.table %}
+        <tr><td>{{ label }}</td><td>{{ model }}</td><td>{{ home }}</td><td>{{ freq }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endmacro %}
+{% macro history_rows(view, table_id, time_label) %}
+  <div class="wrap">
+    <table id="{{ table_id }}" class="history">
+      <thead>
+        <tr>
+          <th>开球 UTC</th>
+          <th>开球 新加坡</th>
+          <th>主队</th>
+          <th>客队</th>
+          <th>全场 主/平/客</th>
+          <th>全场预测</th>
+          <th>半场预测</th>
+          <th>前三比分</th>
+          <th>全场实际</th>
+          <th>半场实际</th>
+          <th>全场</th>
+          <th>半场</th>
+          <th>前三</th>
+          <th>累计全场</th>
+          <th>累计前三</th>
+          <th>{{ time_label }}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in view.rows %}
+        <tr data-status="{{ row.status }}">
+          <td>{{ row.utc }}</td>
+          <td>{{ row.singapore }}</td>
+          <td><a href="{{ url_for('fixture_detail', fixture_id=row.fixture_id) }}">{{ row.home_team }}</a></td>
+          <td><a href="{{ url_for('fixture_detail', fixture_id=row.fixture_id) }}">{{ row.away_team }}</a></td>
+          <td>{{ row.ft }}</td>
+          <td>{{ row.ft_pick }}</td>
+          <td>{{ row.ht_pick }}</td>
+          <td>{{ row.top3 }}</td>
+          {% if row.status == "finished" %}
+          <td>{{ row.actual_ft }}</td>
+          <td>{{ row.actual_ht or "—" }}</td>
+          <td class="mark">{{ row.ft_hit }}</td>
+          <td class="mark">{{ row.ht_hit }}</td>
+          <td class="mark">{{ row.top3_hit }}</td>
+          <td>{{ row.running_ft }}</td>
+          <td>{{ row.running_top3 }}</td>
+          {% elif row.status == "not_played" %}
+          <td colspan="7">未进行（{{ row.state_name or "延期或取消" }}），不计入命中率</td>
+          {% else %}
+          <td colspan="7">已开球，等待赛果。下一次「更新数据」后补上</td>
+          {% endif %}
+          <td>{% if table_id == "live-history" %}{{ row.generated }}{% if row.n_generations > 1 %}（开球前共生成 {{ row.n_generations }} 次，显示最后一次）{% endif %}{% else %}{{ row.cutoff_utc }} UTC 之前的完场{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endmacro %}
+{% block body %}
+<section class="panel" id="live-section">
+  <h2>历史记录</h2>
+  <p class="muted">每次预测未开赛比赛（命令行 <code>predict</code>、每日脚本、或操作台按钮），每场比赛都会追加一行到 <code>data/archive/predictions.jsonl</code>。这个文件只追加、不改写；开球之后生成的预测会被拒绝。下表每场比赛用的是开球前最后一次生成的预测，也就是当时能看到的数字。赛果来自本地比赛表。</p>
+  {% if not live.rows %}
+  <p class="empty">还没有开球后的存档预测。预测过的比赛开球并更新数据之后，会出现在这里。这里不会填入示例比赛。</p>
+  {% else %}
+  <p class="muted">已有赛果 {{ live.summary.n_finished }} 场（有半场比分 {{ live.summary.n_ht }} 场），等待赛果 {{ live.summary.n_awaiting }} 场，未进行 {{ live.summary.n_not_played }} 场。历史频率基准只用每次预测之前的完场比赛：胜平负按频率给概率，前三比分是那时最常见的三个比分。永远猜主胜不需要训练。场次少的时候命中率波动很大。</p>
+  {{ summary_table(live, "实时预测（开球前存档）") }}
+  <p>
+    <a href="{{ url_for('download_history_csv') }}">下载历史 CSV</a>
+    ·
+    <a href="{{ url_for('download_history_json') }}">下载历史 JSON</a>
+  </p>
+  {{ history_rows(live, "live-history", "预测生成于") }}
+  {% endif %}
+</section>
+
+<section class="panel" id="reconstruction-section" style="margin-top: 14px">
+  <h2>回测重建（不是实时预测）</h2>
+  <p class="muted">存档开始之前已经踢完的本赛季比赛，可以按严格的时间顺序补算：每个比赛日只用当天 00:00 UTC 之前的完场比赛重新拟合，和「运行回测」同一个切法。这些数字是事后重建，不是当时发布过的预测，单独统计，不并入上面的实时命中率。再次运行会覆盖上一次重建，不会动实时存档。</p>
+  <form id="backfill-form" method="post" action="{{ url_for('start_backfill') }}">
+    <label>最少训练场次
+      <input name="min_train" type="number" min="4" value="{{ min_train_default }}" required>
+    </label>
+    <button type="submit">回测重建本赛季</button>
+  </form>
+  {% if rebuilt.rows %}
+  <p class="muted">重建 {{ rebuilt.summary.n_finished }} 场（有半场比分 {{ rebuilt.summary.n_ht }} 场）。</p>
+  {{ summary_table(rebuilt, "回测重建（事后按时间顺序补算）") }}
+  {{ history_rows(rebuilt, "reconstruction-history", "训练数据截止") }}
+  {% else %}
+  <p class="empty">还没有回测重建。需要先有本赛季的完场比赛。</p>
+  {% endif %}
+</section>
+{% endblock %}

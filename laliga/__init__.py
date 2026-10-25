@@ -6,4 +6,4 @@ Both distributions yield 1X2 probabilities, and the full-time matrix yields
 the three most likely exact scores.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

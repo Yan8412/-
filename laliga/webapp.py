@@ -17,16 +17,18 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
-from flask import Flask, abort, redirect, render_template, request, send_file, url_for
+from flask import Flask, Response, abort, redirect, render_template, request, send_file, url_for
 from werkzeug.serving import make_server
 
+from laliga.archive import PredictionArchive, history_report, reconstruct_season
 from laliga.backtest import iter_model_keys, model_label, walk_forward
 from laliga.config import DEFAULT_SEASONS, ModelConfig, api_token
 from laliga.data.client import SportMonksError, open_client
 from laliga.data.fetch import fetch_historical, fetch_window
 from laliga.data.store import MatchStore
 from laliga.model.dixon_coles import FitError
-from laliga.model.service import ScorelineModel, fit_models, model_is_fresh
+from laliga.model.service import fit_models
+from laliga.pipeline import archive_scored, dashboard_items, score_fixtures, split_kickoff, write_dashboard_latest
 from laliga.schedule import scheduled_between, select_next_matchday
 
 WEB_MAX_ITER = 80
@@ -106,18 +108,6 @@ def serve(data_dir: Path, *, host: str = "127.0.0.1", port: int = 8765, demo: bo
     server.serve_forever()
 
 
-def split_kickoff(value: str) -> tuple[str, str]:
-    """Return (UTC, Asia/Singapore) clock times as YYYY-MM-DD HH:MM."""
-
-    stamp = pd.Timestamp(value)
-    if stamp.tzinfo is None:
-        stamp = stamp.tz_localize("UTC")
-    else:
-        stamp = stamp.tz_convert("UTC")
-    singapore = stamp.tz_convert("Asia/Singapore")
-    return stamp.strftime("%Y-%m-%d %H:%M"), singapore.strftime("%Y-%m-%d %H:%M")
-
-
 def format_when(value: str) -> str:
     """Clock time in Asia/Singapore, with UTC, and no microseconds."""
 
@@ -158,7 +148,7 @@ def _register(app: Flask) -> None:
 
     @app.get("/predictions")
     def predictions():
-        payload = _read_json(store().predictions_dir / "latest.json")
+        payload = _latest_payload(store())
         items = []
         created_label = ""
         if payload:
@@ -170,7 +160,7 @@ def _register(app: Flask) -> None:
 
     @app.get("/fixtures/<int:fixture_id>")
     def fixture_detail(fixture_id: int):
-        payload = _read_json(store().predictions_dir / "latest.json") or {}
+        payload = _latest_payload(store()) or {}
         item = next((row for row in payload.get("items") or [] if int(row["fixture_id"]) == fixture_id), None)
         match = _match_row(store(), fixture_id)
         if item is None and match is None:
@@ -211,6 +201,69 @@ def _register(app: Flask) -> None:
     @app.get("/data")
     def data_page():
         return render_template("data.html", status=_status(store()))
+
+    @app.get("/history")
+    def history_page():
+        report = history_report(store().root, store().load())
+        return render_template(
+            "history.html",
+            live=_history_view(report["live"]),
+            rebuilt=_history_view(report["backtest_reconstruction"]),
+            min_train_default=18 if demo() else 320,
+        )
+
+    @app.get("/history.json")
+    def download_history_json():
+        report = history_report(store().root, store().load())
+        if not report["live"]["rows"] and not report["backtest_reconstruction"]["rows"]:
+            return render_template("missing_file.html", label="历史记录 JSON"), 404
+        body = json.dumps(report, ensure_ascii=False, indent=2)
+        return Response(
+            body,
+            mimetype="application/json",
+            headers={"Content-Disposition": "attachment; filename=history.json"},
+        )
+
+    @app.get("/history.csv")
+    def download_history_csv():
+        report = history_report(store().root, store().load())
+        rows = report["live"]["rows"] + report["backtest_reconstruction"]["rows"]
+        if not rows:
+            return render_template("missing_file.html", label="历史记录 CSV"), 404
+        return Response(
+            _history_csv(rows),
+            mimetype="text/csv",
+            headers={"Content-Disposition": "attachment; filename=history.csv"},
+        )
+
+    @app.post("/actions/backfill")
+    def start_backfill():
+        try:
+            min_train = int(request.form.get("min_train", "320"))
+        except ValueError:
+            min_train = 0
+
+        def work() -> str:
+            if min_train < 4:
+                raise FitError("最少训练场次至少为 4。")
+            history = _require_finished(store())
+            built = reconstruct_season(history, _web_config(min_train=min_train))
+            if not built.records:
+                raise FitError(
+                    f"本赛季没有可以重建的完场比赛（跳过 {built.skipped_days} 个训练样本不足的比赛日）。"
+                    "可以降低最少训练场次。"
+                )
+            PredictionArchive(store().root).replace_reconstruction(built.records)
+            logging.getLogger("laliga.webapp").info(
+                "回测重建完成：赛季 %s，%s 场，%s 个比赛日（跳过 %s 个）。这些不是当时的实时预测。",
+                built.season_id,
+                len(built.records),
+                built.days,
+                built.skipped_days,
+            )
+            return "/history"
+
+        return _launch(app, "正在回测重建", work, "查看历史记录", done_title="回测重建完成", failed_title="回测重建失败")
 
     @app.get("/predictions.csv")
     def download_predictions_csv():
@@ -413,109 +466,14 @@ def _range_fixtures(store: MatchStore, start: date, end: date, *, demo_mode: boo
 def _write_predictions(store: MatchStore, fixtures, label: str, note: str) -> None:
     history = store.load()
     config = _web_config(min_train=4)
-    items = _score_fixtures(history, fixtures, config, store)
-    payload = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "label": label,
-        "note": note,
-        "items": items,
-    }
-    store.predictions_dir.mkdir(parents=True, exist_ok=True)
-    (store.predictions_dir / "latest.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    (store.predictions_dir / "latest.csv").write_text(_predictions_csv(items), encoding="utf-8")
-    logging.getLogger("laliga.webapp").info("已预测 %s 场（%s）。", len(items), label)
-
-
-def _score_fixtures(history, fixtures, config: ModelConfig, store: MatchStore) -> list[dict]:
-    ordered = fixtures.sort_values(["starting_at", "fixture_id"])
-    eligible = history[~history["fixture_id"].isin({int(value) for value in ordered["fixture_id"]})]
-    saved = _load_saved_model(store)
-    items: list[dict] = []
-    if saved is not None and model_is_fresh(saved, eligible, ordered):
-        for _, row in ordered.iterrows():
-            items.append(_pack(saved, row))
-        return items
-    previous: ScorelineModel | None = None
-    model: ScorelineModel | None = None
-    for day, group in ordered.groupby(ordered["starting_at"].dt.floor("D"), sort=True):
-        model = fit_models(
-            eligible,
-            pd.Timestamp(day),
-            config,
-            initial_ft=None if previous is None else previous.ft,
-            initial_ht=None if previous is None else previous.ht,
-        )
-        previous = model
-        for _, row in group.iterrows():
-            items.append(_pack(model, row))
-    if model is not None:
-        store.save_model_document(model.to_dict())
-    return items
-
-
-def _load_saved_model(store: MatchStore) -> ScorelineModel | None:
-    document = store.load_model_document()
-    if not document:
-        return None
-    try:
-        return ScorelineModel.from_dict(document)
-    except (KeyError, TypeError, ValueError, FitError):
-        return None
-
-
-def _pack(model: ScorelineModel, row) -> dict:
-    prediction = model.predict_row(row)
-    home_id = int(row["home_team_id"])
-    away_id = int(row["away_team_id"])
-    document = prediction.to_dict()
-    document["ft_matrix"] = model.ft.score_matrix(home_id, away_id).round(6).tolist()
-    document["ht_matrix"] = model.ht.score_matrix(home_id, away_id).round(6).tolist()
-    return document
-
-
-def _predictions_csv(items: list[dict]) -> str:
-    buffer = io.StringIO()
-    fieldnames = [
-        "fixture_id",
-        "kickoff_utc",
-        "kickoff_singapore",
-        "home_team",
-        "away_team",
-        "ft_home",
-        "ft_draw",
-        "ft_away",
-        "ht_home",
-        "ht_draw",
-        "ht_away",
-        "score_1",
-        "score_1_prob",
-        "score_2",
-        "score_2_prob",
-        "score_3",
-        "score_3_prob",
-    ]
-    writer = csv.DictWriter(buffer, fieldnames=fieldnames)
-    writer.writeheader()
-    for item in items:
-        utc, singapore = split_kickoff(item["starting_at"])
-        row = {
-            "fixture_id": item["fixture_id"],
-            "kickoff_utc": utc,
-            "kickoff_singapore": singapore,
-            "home_team": item["home_team"],
-            "away_team": item["away_team"],
-            "ft_home": item["ft"]["home"],
-            "ft_draw": item["ft"]["draw"],
-            "ft_away": item["ft"]["away"],
-            "ht_home": item["ht"]["home"],
-            "ht_draw": item["ht"]["draw"],
-            "ht_away": item["ht"]["away"],
-        }
-        for index, score in enumerate(item["top_scores"], start=1):
-            row[f"score_{index}"] = f"{score['home_goals']}-{score['away_goals']}"
-            row[f"score_{index}_prob"] = score["probability"]
-        writer.writerow(row)
-    return buffer.getvalue()
+    log = logging.getLogger("laliga.webapp")
+    scored = score_fixtures(history, fixtures, config, store, save_refit=True, notify=log.info)
+    items = dashboard_items(scored)
+    write_dashboard_latest(store, items, label=label, note=note)
+    archived = archive_scored(store, scored, history, origin=f"dashboard:{label}")
+    log.info("已预测 %s 场（%s）。写入预测存档 %s 场。", len(items), label, archived.accepted)
+    if archived.refused:
+        log.info("有 %s 场已经开球或不是未开赛状态，没有写入存档。", len(archived.refused))
 
 
 def _write_backtest(store: MatchStore, report) -> None:
@@ -741,6 +699,153 @@ def _read_json(path: Path) -> dict | None:
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _latest_payload(store: MatchStore) -> dict | None:
+    """The dashboard file, or a bare prediction list written by an older daily script."""
+
+    payload = _read_json(store.predictions_dir / "latest.json")
+    if isinstance(payload, list):
+        return {"created_at": "", "label": "latest.json（列表格式）", "note": "", "items": payload}
+    return payload
+
+
+_OUTCOME_LABELS = {"home": "主胜", "draw": "平", "away": "客胜", None: "—"}
+
+
+def _pct(value) -> str:
+    if value is None:
+        return "—"
+    return f"{float(value) * 100:.1f}%"
+
+
+def _num(value, digits: int = 4) -> str:
+    if value is None:
+        return "—"
+    return f"{float(value):.{digits}f}"
+
+
+def _mark(value) -> str:
+    if value is None:
+        return "—"
+    return "命中" if value else "未中"
+
+
+def _history_view(section: dict) -> dict:
+    summary = section["summary"]
+    model = summary["model"]
+    home = summary["always_home"]
+    freq = summary["frequency"]
+    table = [
+        ("全场胜平负命中率", _pct(model["ft_hit_rate"]), _pct(home["ft_hit_rate"]), _pct(freq["ft_hit_rate"])),
+        ("半场胜平负命中率", _pct(model["ht_hit_rate"]), _pct(home["ht_hit_rate"]), _pct(freq["ht_hit_rate"])),
+        ("实际比分落在前三", _pct(model["top3_hit_rate"]), "—", _pct(freq["top3_hit_rate"])),
+        ("全场对数损失（越低越好）", _num(model["ft_log_loss"]), "—", _num(freq["ft_log_loss"])),
+        ("全场 RPS（越低越好）", _num(model["ft_rps"]), "—", _num(freq["ft_rps"])),
+    ]
+    rows = []
+    for row in reversed(section["rows"]):
+        utc, singapore = split_kickoff(row["kickoff_utc"])
+        generated_utc, generated_sg = split_kickoff(row["generated_at"])
+        cutoff_utc, _ = split_kickoff(row.get("information_cutoff") or row["generated_at"])
+        ft_pick = max(("home", "draw", "away"), key=lambda key: row["ft"][key])
+        ht_pick = max(("home", "draw", "away"), key=lambda key: row["ht"][key])
+        running = row.get("running") or {}
+        baseline = row.get("baseline") or {}
+        rows.append(
+            {
+                "fixture_id": row["fixture_id"],
+                "utc": utc,
+                "singapore": singapore,
+                "home_team": row["home_team"],
+                "away_team": row["away_team"],
+                "ft": f"{_pct(row['ft']['home'])} / {_pct(row['ft']['draw'])} / {_pct(row['ft']['away'])}",
+                "ft_pick": _OUTCOME_LABELS[ft_pick],
+                "ht_pick": _OUTCOME_LABELS[ht_pick],
+                "top3": "，".join(
+                    f"{item['home_goals']}-{item['away_goals']} {_pct(item['probability'])}" for item in row["top_scores"]
+                ),
+                "status": row["status"],
+                "actual_ft": row.get("actual_ft") or "",
+                "actual_ht": row.get("actual_ht") or "",
+                "ft_hit": _mark(row.get("ft_hit")),
+                "ht_hit": _mark(row.get("ht_hit")),
+                "top3_hit": _mark(row.get("top3_hit")),
+                "baseline_top3": "，".join(baseline.get("top_scores") or []),
+                "running_ft": _pct(running.get("ft_hit_rate")),
+                "running_top3": _pct(running.get("top3_hit_rate")),
+                "generated": f"{generated_sg} 新加坡（{generated_utc} UTC）",
+                "cutoff_utc": cutoff_utc,
+                "model_version": row.get("model_version") or "",
+                "n_generations": row.get("n_generations") or 1,
+                "state_name": row.get("state_name") or "",
+            }
+        )
+    return {"summary": summary, "table": table, "rows": rows}
+
+
+def _history_csv(rows: list[dict]) -> str:
+    buffer = io.StringIO()
+    fields = [
+        "source",
+        "fixture_id",
+        "kickoff_utc",
+        "home_team",
+        "away_team",
+        "generated_at",
+        "information_cutoff",
+        "model_version",
+        "ft_home",
+        "ft_draw",
+        "ft_away",
+        "ht_home",
+        "ht_draw",
+        "ht_away",
+        "top_1",
+        "top_2",
+        "top_3",
+        "status",
+        "actual_ft",
+        "actual_ht",
+        "ft_hit",
+        "ht_hit",
+        "top3_hit",
+        "baseline_ft_hit",
+        "baseline_top3_hit",
+        "always_home_ft_hit",
+    ]
+    writer = csv.DictWriter(buffer, fieldnames=fields)
+    writer.writeheader()
+    for row in rows:
+        baseline = row.get("baseline") or {}
+        tops = [f"{item['home_goals']}-{item['away_goals']}" for item in row["top_scores"]]
+        writer.writerow(
+            {
+                "source": row["source"],
+                "fixture_id": row["fixture_id"],
+                "kickoff_utc": row["kickoff_utc"],
+                "home_team": row["home_team"],
+                "away_team": row["away_team"],
+                "generated_at": row["generated_at"],
+                "information_cutoff": row.get("information_cutoff") or "",
+                "model_version": row.get("model_version") or "",
+                **{f"ft_{key}": row["ft"][key] for key in ("home", "draw", "away")},
+                **{f"ht_{key}": row["ht"][key] for key in ("home", "draw", "away")},
+                "top_1": tops[0] if len(tops) > 0 else "",
+                "top_2": tops[1] if len(tops) > 1 else "",
+                "top_3": tops[2] if len(tops) > 2 else "",
+                "status": row["status"],
+                "actual_ft": row.get("actual_ft") or "",
+                "actual_ht": row.get("actual_ht") or "",
+                "ft_hit": row.get("ft_hit"),
+                "ht_hit": row.get("ht_hit"),
+                "top3_hit": row.get("top3_hit"),
+                "baseline_ft_hit": baseline.get("ft_hit"),
+                "baseline_top3_hit": baseline.get("top3_hit"),
+                "always_home_ft_hit": row.get("always_home_ft_hit"),
+            }
+        )
+    return buffer.getvalue()
 
 
 def _send_or_missing(path: Path, download_name: str, label: str):

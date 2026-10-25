@@ -91,6 +91,159 @@ def write_predictions_json(predictions: list[Prediction], path: Path) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def latest_next_problem(payload) -> str:
+    """Empty when ``latest_next.json`` still has the shape the notifier reads."""
+
+    if not isinstance(payload, list):
+        return "顶层应该是列表"
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            return f"第 {index + 1} 项不是对象"
+        for key in ("starting_at", "home_team", "away_team", "ft", "ht", "top_scores", "expected_goals_ft", "expected_goals_ht"):
+            if key not in item:
+                return f"第 {index + 1} 项缺少 {key}"
+        stamp = pd.Timestamp(item["starting_at"])
+        if stamp.tzinfo is None or stamp.utcoffset().total_seconds() != 0:
+            return f"第 {index + 1} 项 starting_at 不是 UTC"
+        for market in ("ft", "ht"):
+            if set(item[market]) != {"home", "draw", "away"}:
+                return f"第 {index + 1} 项 {market} 不是 home/draw/away"
+        for score in item["top_scores"]:
+            if set(score) != {"home_goals", "away_goals", "probability"}:
+                return f"第 {index + 1} 项 top_scores 字段不对"
+        for market in ("expected_goals_ft", "expected_goals_ht"):
+            if set(item[market]) != {"home", "away"}:
+                return f"第 {index + 1} 项 {market} 不是 home/away"
+    return ""
+
+
+def format_history(report: dict, *, limit: int = 20) -> str:
+    lines: list[str] = []
+    for key, title in (("live", "实时预测（开球前最后一次存档）"), ("backtest_reconstruction", "回测重建（事后按时间顺序补算，不是实时预测）")):
+        section = report[key]
+        summary = section["summary"]
+        if not section["rows"]:
+            if key == "live":
+                lines.append(f"{title}：还没有开球后的存档预测。")
+            continue
+        lines.append(
+            f"{title}：有赛果 {summary['n_finished']} 场（有半场比分 {summary['n_ht']} 场），"
+            f"等待赛果 {summary['n_awaiting']} 场，未进行 {summary['n_not_played']} 场。"
+        )
+        model = summary["model"]
+        home = summary["always_home"]
+        freq = summary["frequency"]
+        rows = [["指标", "模型", "永远猜主胜", "历史频率基准"]]
+        rows.append(["全场胜平负命中率", _rate(model["ft_hit_rate"]), _rate(home["ft_hit_rate"]), _rate(freq["ft_hit_rate"])])
+        rows.append(["半场胜平负命中率", _rate(model["ht_hit_rate"]), _rate(home["ht_hit_rate"]), _rate(freq["ht_hit_rate"])])
+        rows.append(["实际比分落在前三", _rate(model["top3_hit_rate"]), "—", _rate(freq["top3_hit_rate"])])
+        rows.append(["全场对数损失", _format_optional(model["ft_log_loss"]), "—", _format_optional(freq["ft_log_loss"])])
+        rows.append(["全场 RPS", _format_optional(model["ft_rps"]), "—", _format_optional(freq["ft_rps"])])
+        lines.append(_table(rows))
+        recent = section["rows"][-limit:] if limit > 0 else []
+        table = [["开球(UTC)", "主队", "客队", "全场预测", "前三比分", "赛果", "全场", "半场", "前三"]]
+        for row in reversed(recent):
+            pick = max(("home", "draw", "away"), key=lambda side: row["ft"][side])
+            tops = " ".join(f"{item['home_goals']}-{item['away_goals']}" for item in row["top_scores"])
+            if row["status"] == "finished":
+                outcome = f"{row['actual_ft']}（半场 {row.get('actual_ht') or '—'}）"
+                marks = [_hit(row.get("ft_hit")), _hit(row.get("ht_hit")), _hit(row.get("top3_hit"))]
+            elif row["status"] == "not_played":
+                outcome, marks = "未进行", ["—", "—", "—"]
+            else:
+                outcome, marks = "等待赛果", ["—", "—", "—"]
+            table.append(
+                [
+                    pd.Timestamp(row["kickoff_utc"]).strftime("%Y-%m-%d %H:%M"),
+                    row["home_team"],
+                    row["away_team"],
+                    f"{_OUTCOME_TEXT[pick]} {_pct(row['ft'][pick])}",
+                    tops,
+                    outcome,
+                    *marks,
+                ]
+            )
+        lines.append(_table(table))
+        lines.append("")
+    if not lines:
+        return "还没有存档预测。"
+    return "\n".join(lines).rstrip()
+
+
+_OUTCOME_TEXT = {"home": "主胜", "draw": "平", "away": "客胜"}
+
+
+def _rate(value) -> str:
+    return "—" if value is None else f"{float(value) * 100:.1f}%"
+
+
+def _hit(value) -> str:
+    if value is None:
+        return "—"
+    return "中" if value else "未中"
+
+
+def format_availability_report(report) -> str:
+    from laliga.model.availability import FEATURE_LABELS
+
+    labels = {"baseline": "历史频率基准", "dixon_coles": "Dixon–Coles", **FEATURE_LABELS}
+    lines = [
+        f"伤停/首发走步评估：{report.n_folds} 个评测日，{report.first_test_day} 至 {report.last_test_day}，"
+        f"每个评测日前至少 {report.min_train_matches} 场完场比赛。",
+        f"评测 {report.coverage['n_evaluated']} 场；有伤停特征 {report.coverage['with_missing_feature']} 场"
+        f"（其中至少一方缺主力 {report.coverage['with_nonzero_missing']} 场）；有首发特征 {report.coverage['with_lineup_feature']} 场。",
+        f"伤停调整生效 {report.coverage.get('missing_active', 0)} 场，首发调整生效 {report.coverage.get('lineup_gap_active', 0)} 场。",
+        "",
+        "全部评测比赛（调整没生效的比赛，概率等于 Dixon–Coles）：",
+        _availability_table(report.models, labels),
+    ]
+    for feature, blocks in report.active.items():
+        lines.append("")
+        lines.append(f"只看 {labels[feature]} 生效的比赛：")
+        lines.append(_availability_table(blocks, labels))
+    lines.append("")
+    lines.append("配对比较（负值表示减号前面的模型更好，区间是 1000 次 bootstrap 的 95% 分位）：")
+    rows = [["比较", "对数损失之差", "95% 区间", "RPS 之差", "RPS 区间", "n"]]
+    for item in report.paired:
+        rows.append(
+            [
+                item["label"],
+                f"{item['mean_logloss_difference']:+.4f}",
+                f"{item['ci_low']:+.4f} 到 {item['ci_high']:+.4f}",
+                f"{item['mean_rps_difference']:+.4f}",
+                f"{item['rps_ci_low']:+.4f} 到 {item['rps_ci_high']:+.4f}",
+                str(item["n"]),
+            ]
+        )
+    lines.append(_table(rows))
+    for feature, coef in report.coefficients.items():
+        lines.append(
+            f"{labels[feature]} 全样本系数：每缺一名主力，本队进球 ×exp(−{coef['attack_per_missing_starter']:.3f})，"
+            f"对手进球 ×exp({coef['defence_per_missing_starter']:+.3f})，n={coef['n']}。"
+        )
+    lines.append("")
+    lines.append(report.recommendation)
+    lines.extend(report.notes)
+    return "\n".join(lines)
+
+
+def _availability_table(blocks: dict, labels: dict) -> str:
+    rows = [["模型", "全场对数损失", "全场 RPS", "全场 Brier", "全场命中率", "前三比分命中率", "n"]]
+    for key, block in blocks.items():
+        rows.append(
+            [
+                labels.get(key, key),
+                _format_metric(block.ft_log_loss, False, 4),
+                _format_metric(block.ft_rps, False, 4),
+                _format_metric(block.ft_brier, False, 4),
+                _format_metric(block.ft_accuracy, True, 1),
+                _format_metric(block.top3_hit_rate, True, 1),
+                str(block.n),
+            ]
+        )
+    return _table(rows)
+
+
 def format_backtest(report: BacktestReport) -> str:
     lines = [
         f"走步回测：{report.n_folds} 个评测日，"

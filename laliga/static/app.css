@@ -155,3 +155,9 @@ pre.log {
   padding: 12px;
   min-height: 3em;
 }
+
+table.summary { width: auto; min-width: 480px; margin-bottom: 10px; }
+table.summary caption { text-align: left; padding: 0 0 4px; }
+td.mark { white-space: nowrap; font-weight: 650; }
+tr[data-status="awaiting"] td, tr[data-status="not_played"] td { color: var(--muted); }
+table.history th, table.history td:nth-child(-n+2) { white-space: nowrap; }
