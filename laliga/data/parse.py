@@ -84,11 +84,19 @@ _FULLTIME_MARKET_NAMES = {
 _OUTCOME_SIDES = {
     "home": "home",
     "1": "home",
-    "draw": "draw",
-    "x": "draw",
     "away": "away",
     "2": "away",
 }
+
+
+def _outcome_words() -> dict[str, str]:
+    """1X2 labels, including the same draw phrases the quotes parser accepts."""
+
+    from laliga.data.quotes import _DRAW_WORDS
+
+    sides = dict(_OUTCOME_SIDES)
+    sides.update({word: "draw" for word in _DRAW_WORDS})
+    return sides
 
 
 def empty_matches() -> pd.DataFrame:
@@ -430,13 +438,10 @@ def _prematch_odd_rows(fixture: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def _as_utc(value: Any) -> pd.Timestamp | None:
-    if value is None or value == "":
-        return None
-    stamp = pd.to_datetime(value, utc=True, errors="coerce")
-    if pd.isna(stamp):
-        return None
-    return pd.Timestamp(stamp)
+def _as_utc(value: Any):
+    from laliga.data.quotes import _stamp
+
+    return _stamp(value)
 
 
 def _price_time(row: dict[str, Any]) -> pd.Timestamp | None:
@@ -448,12 +453,11 @@ def _price_time(row: dict[str, Any]) -> pd.Timestamp | None:
 
 
 def _is_before_kickoff(row: dict[str, Any], kickoff: pd.Timestamp | None) -> bool:
-    if kickoff is None:
-        return True
-    stamp = _price_time(row)
-    if stamp is None:
-        return True
-    return stamp < kickoff
+    """Same pre-match rule as the quotes file. A timestamp at or after kickoff is dropped."""
+
+    from laliga.data.quotes import is_prematch_quote
+
+    return is_prematch_quote(row, kickoff)
 
 
 def _is_newer_quote(stamp: pd.Timestamp | None, previous: pd.Timestamp | None) -> bool:
@@ -486,7 +490,7 @@ def _is_fulltime_result_market(row: dict[str, Any]) -> bool:
 def _outcome_side(value: Any) -> str | None:
     if value is None:
         return None
-    return _OUTCOME_SIDES.get(str(value).strip().lower())
+    return _outcome_words().get(str(value).strip().lower())
 
 
 def _decimal_price(value: Any) -> float | None:

@@ -192,3 +192,26 @@ written in the meantime would be replaced by the backup copy; copy
 
 3. That the current-season refetch picks up results: after a matchday,
    `check-freshness` should report the latest result within a day or two.
+
+## Weekly upgrade (optional)
+
+`auto_upgrade.ps1` does not write `latest_next.json`. It runs
+`python -m laliga upgrade` and only replaces `data\models\registry.json` when
+the challenger beats the champion on matches the search never saw. Schedule it
+weekly, separate from the daily task:
+
+```powershell
+$Action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File "D:\laliga-predictor\auto_upgrade.ps1"' -WorkingDirectory 'D:\laliga-predictor'
+$Trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At 6:00am
+Register-ScheduledTask -TaskName 'LaLiga weekly upgrade' -Action $Action -Trigger $Trigger
+```
+
+The next daily `auto_update.ps1` reads the champion. Roll back with:
+
+```powershell
+.\.venv\Scripts\python.exe -m laliga upgrade --rollback
+```
+
+Without a live token, `python -m laliga probe` cannot be checked here. After
+the token is set, run it once and read which of markets 1, 6, 12, 26, 28, 29,
+30, 31, 57 and 80, which bookmakers, and which xG fields actually come back.

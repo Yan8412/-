@@ -6,9 +6,12 @@ This module is the one-off (and later incremental) pass:
 * xG: ``GET /fixtures/multi/{ids}?include=xGFixture``, up to 50 ids per
   request. Type 5304 only. xGA is the opponent's xG.
 * Odds: ``GET /fixtures/multi/{ids}?include=odds&filters=markets:1``.
-  Market 1 is Fulltime Result. ``inplayOdds`` is never requested. Quotes
-  at or after kickoff are dropped, then the remaining bookmakers are
-  averaged and de-vigged.
+  Market 1 is Fulltime Result. ``inplayOdds`` is never requested. A quote
+  at or after kickoff is always dropped, including rows with ``stopped``
+  or ``winning`` set. A missing timestamp stays. The remaining bookmakers
+  are averaged and de-vigged. ``--refresh`` replaces that fixture's quote
+  record. A stored record whose ``parser_version`` is not current is
+  parsed again from the cached payload.
 
 A second run asks again for rows that are still missing odds, for finished
 rows that have a de-vigged price but no ``raw_implied_*`` (Shin and power
@@ -30,6 +33,14 @@ import pandas as pd
 
 from laliga.data.client import SportMonksClient, SportMonksError
 from laliga.data.parse import aggregate_prematch_1x2, team_expected_goals
+from laliga.data.quotes import (
+    EXTENDED_FILTER,
+    MARKET_NAMES,
+    PARSER_VERSION,
+    absorb_fixture_odds,
+    load_quotes,
+    save_quotes,
+)
 from laliga.data.store import MatchStore
 from laliga.model.features import ODDS_FEATURES, odds_features
 
@@ -57,6 +68,8 @@ class MarketFetchResult:
     xg_requested: int
     odds_denied: str | None
     xg_denied: str | None
+    quotes_saved: int = 0
+    extended_note: str | None = None
 
 
 def fetch_stored_markets(
@@ -77,7 +90,21 @@ def fetch_stored_markets(
     attempts = _load_attempts(store)
     if force:
         attempts = {"odds": set(), "xg": set()}
-    odds_ids = [int(row.fixture_id) for row in frame.itertuples(index=False) if _wants_odds(row, force, attempts["odds"])]
+    stored_quotes = load_quotes(store.root)
+    stale_ids = _stale_quote_ids(frame, stored_quotes)
+    odds_ids = []
+    seen_odds: set[int] = set()
+    for row in frame.itertuples(index=False):
+        try:
+            fixture_id = int(row.fixture_id)
+        except (TypeError, ValueError):
+            continue
+        if fixture_id in seen_odds:
+            continue
+        if _wants_odds(row, force, attempts["odds"]) or fixture_id in stale_ids:
+            odds_ids.append(fixture_id)
+            seen_odds.add(fixture_id)
+    replace_ids = set(odds_ids) if force else stale_ids
     xg_ids = [int(row.fixture_id) for row in frame.itertuples(index=False) if _wants_xg(row, force, attempts["xg"])]
     odds_denied = _pull_chunks(
         client,
@@ -89,6 +116,8 @@ def fetch_stored_markets(
         denial=ODDS_DENIED,
         chunk_size=chunk_size,
         attempts=attempts,
+        quotes_root=store.root,
+        replace_ids=replace_ids,
     )
     xg_denied = _pull_chunks(
         client,
@@ -101,6 +130,12 @@ def fetch_stored_markets(
         chunk_size=chunk_size,
         attempts=attempts,
     )
+    extended_note = None
+    quotes_saved = 0
+    if odds_denied is None and odds_ids:
+        extended_note, quotes_saved = _pull_extended(client, store.root, frame, odds_ids, chunk_size=chunk_size)
+    elif odds_denied is None:
+        quotes_saved = 0
     store.replace(frame)
     _save_attempts(store, attempts)
     return MarketFetchResult(
@@ -111,6 +146,8 @@ def fetch_stored_markets(
         xg_requested=len(xg_ids),
         odds_denied=odds_denied,
         xg_denied=xg_denied,
+        quotes_saved=quotes_saved,
+        extended_note=extended_note,
     )
 
 
@@ -120,9 +157,17 @@ def format_market_fetch(result: MarketFetchResult) -> str:
         f"完整赛前 1X2：{result.odds_complete} 场（本次计划请求 {result.odds_requested} 场）。",
         f"完场且主客 xG 都有：{result.xg_complete} 场（本次计划请求 {result.xg_requested} 场）。",
         "赔率来自赛前 include=odds、filters=markets:1（全场胜平负）。",
-        "每家博彩只用开赛前最后一条报价；多家取隐含概率平均后再去掉水位。不请求 inplayOdds。",
+        "每家博彩只用赛前最后一条报价；多家取隐含概率平均后再去掉水位。不请求 inplayOdds。",
+        "latest_bookmaker_update 早于开球的保留。不早于开球的一律丢掉，包括 stopped 为真和 winning 为 false 的行。现场盘每一行都带 winning，不能靠它把结算和滚球分开。没有时间戳的保留。显式滚球标记一律丢掉。某个盘筛完没有报价，就留空。",
+        "同一选项已经有未停盘的报价时，更早的 stopped 行不算第二口。Tie 与 Draw、队名与 1/2 先归一成同一选项。",
+        "带 --refresh 时，这场的记录整份替换，这次响应里没有的盘不会留下。不带 --refresh 时，parser_version 不是当前解析器的记录会用缓存里的原始赔率再解析。",
         "raw_implied_* 是去水位之前的平均 1/小数赔率。Shin 和幂去水位要用它。"
         "只有去水位概率、没有 raw_implied_* 的完场比赛会再请求一次。",
+        "同一批比赛还会再请求一次其他赛前盘："
+        + "、".join(f"{market_id} {name}" for market_id, name in MARKET_NAMES.items() if market_id != 1)
+        + f"。过滤条件 {EXTENDED_FILTER}。",
+        "这些盘写到 processed/odds_quotes.json，每一轮请求结束时写一次，不按场重写。缺某个盘就留空，不影响 1X2 和 xG。",
+        "开盘只在同一选项真有两个时间戳时才有。一行一个选项、只有 latest_bookmaker_update 时，开盘不可用，收盘就是这一口。不同选项时间不同不算历史。",
         "xG 是 xGFixture 的 type 5304。home_xga 是客队 xG，away_xga 是主队 xG。",
         "本场 xG 只留给以后的比赛做滚动均值，不会当成这场的特征。",
         "每日 fetch 和操作台「更新数据」不会跑这一步。补新比赛后再执行本命令即可，已有数值的行会跳过。",
@@ -145,49 +190,143 @@ def _pull_chunks(
     denial: str,
     chunk_size: int,
     attempts: dict[str, set[int]],
+    quotes_root=None,
+    replace_ids: set[int] | None = None,
 ) -> str | None:
     if not fixture_ids:
         return None
     lookup = _fixture_lookup(frame)
     total = len(fixture_ids)
     seen = 0
+    quote_store = load_quotes(quotes_root) if quotes_root is not None and kind == "odds" else None
+    try:
+        for chunk in _chunks(fixture_ids, chunk_size):
+            seen += len(chunk)
+            logger.info("回填%s %s/%s 场", "赔率" if kind == "odds" else "xG", seen, total)
+            params: dict[str, str] = {"include": include}
+            if filters:
+                params["filters"] = filters
+            path = "fixtures/multi/" + ",".join(str(fixture_id) for fixture_id in chunk)
+            returned: set[int] = set()
+            try:
+                for payload in client.paginate(path, params):
+                    if not isinstance(payload, dict):
+                        continue
+                    try:
+                        fixture_key = int(payload.get("id"))
+                    except (TypeError, ValueError):
+                        continue
+                    returned.add(fixture_key)
+                    if quote_store is not None:
+                        meta = lookup.get(fixture_key)
+                        if meta is not None:
+                            absorb_fixture_odds(
+                                quotes_root,
+                                payload,
+                                kickoff=meta.kickoff,
+                                home_id=meta.home_id,
+                                away_id=meta.away_id,
+                                home_name=meta.home_name,
+                                away_name=meta.away_name,
+                                store=quote_store,
+                                flush=False,
+                                replace=fixture_key in (replace_ids or set()),
+                            )
+                    if _apply_payload(frame, lookup, payload, kind):
+                        attempts[kind].discard(fixture_key)
+                    else:
+                        attempts[kind].add(fixture_key)
+            except SportMonksError as exc:
+                if _permission_denied(exc):
+                    logger.warning("%s", denial)
+                    return denial
+                if _missing_result(exc):
+                    logger.info("这批比赛没有%s：%s", "赔率" if kind == "odds" else "xG", exc)
+                    attempts[kind].update(fixture_id for fixture_id in chunk if fixture_id not in returned)
+                    continue
+                raise
+            for fixture_id in chunk:
+                if fixture_id not in returned:
+                    attempts[kind].add(fixture_id)
+        return None
+    finally:
+        if quote_store is not None:
+            save_quotes(quotes_root, quote_store)
+
+
+def _pull_extended(
+    client: SportMonksClient,
+    root,
+    frame: pd.DataFrame,
+    fixture_ids: list[int],
+    *,
+    chunk_size: int,
+) -> tuple[str | None, int]:
+    """Second odds pass for the markets other than 1X2. A 400 or empty book is not fatal."""
+
+    if not fixture_ids:
+        return None, 0
+    lookup = _fixture_lookup(frame)
+    quote_store = load_quotes(root)
+    try:
+        note, saved = _pull_extended_chunks(
+            client, root, fixture_ids, lookup=lookup, quote_store=quote_store, chunk_size=chunk_size
+        )
+        if note is None:
+            _stamp_parser_version(quote_store, fixture_ids)
+        return note, saved
+    finally:
+        save_quotes(root, quote_store)
+
+
+def _pull_extended_chunks(client, root, fixture_ids, *, lookup, quote_store, chunk_size: int):
+    saved = 0
+    note = None
+    total = len(fixture_ids)
+    seen = 0
     for chunk in _chunks(fixture_ids, chunk_size):
         seen += len(chunk)
-        logger.info("回填%s %s/%s 场", "赔率" if kind == "odds" else "xG", seen, total)
-        params: dict[str, str] = {"include": include}
-        if filters:
-            params["filters"] = filters
-        path = "fixtures/multi/" + ",".join(str(fixture_id) for fixture_id in chunk)
-        returned: set[int] = set()
+        logger.info("回填扩展盘 %s/%s 场", seen, total)
         try:
-            for payload in client.paginate(path, params):
-                if not isinstance(payload, dict):
-                    continue
-                try:
-                    fixture_key = int(payload.get("id"))
-                except (TypeError, ValueError):
-                    continue
-                returned.add(fixture_key)
-                if _apply_payload(frame, lookup, payload, kind):
-                    attempts[kind].discard(fixture_key)
-                else:
-                    attempts[kind].add(fixture_key)
+            payloads = list(
+                client.paginate(
+                    "fixtures/multi/" + ",".join(str(item) for item in chunk),
+                    {"include": "odds", "filters": EXTENDED_FILTER},
+                )
+            )
         except SportMonksError as exc:
             if _permission_denied(exc):
-                logger.warning("%s", denial)
-                return denial
-            if _missing_result(exc):
-                logger.info("这批比赛没有%s：%s", "赔率" if kind == "odds" else "xG", exc)
-                attempts[kind].update(fixture_id for fixture_id in chunk if fixture_id not in returned)
+                note = "扩展盘口请求被拒绝（HTTP 403）。1X2 和 xG 已经写回，扩展盘留空。"
+                break
+            note = f"扩展盘口这次没有拿到（{exc}）。1X2 不受影响。"
+            continue
+        for payload in payloads:
+            if not isinstance(payload, dict):
                 continue
-            raise
-        for fixture_id in chunk:
-            if fixture_id not in returned:
-                attempts[kind].add(fixture_id)
-    return None
+            try:
+                fixture_key = int(payload.get("id"))
+            except (TypeError, ValueError):
+                continue
+            meta = lookup.get(fixture_key)
+            if meta is None:
+                continue
+            if absorb_fixture_odds(
+                root,
+                payload,
+                kickoff=meta.kickoff,
+                home_id=meta.home_id,
+                away_id=meta.away_id,
+                home_name=meta.home_name,
+                away_name=meta.away_name,
+                store=quote_store,
+                flush=False,
+                replace=False,
+            ):
+                saved += 1
+    return note, saved
 
 
-def _apply_payload(frame: pd.DataFrame, lookup: dict[int, tuple[int, int, int, pd.Timestamp | None]], payload: dict, kind: str) -> bool:
+def _apply_payload(frame: pd.DataFrame, lookup: dict[int, "_FixtureMeta"], payload: dict, kind: str) -> bool:
     fixture_id = payload.get("id")
     try:
         fixture_key = int(fixture_id)
@@ -196,7 +335,7 @@ def _apply_payload(frame: pd.DataFrame, lookup: dict[int, tuple[int, int, int, p
     meta = lookup.get(fixture_key)
     if meta is None:
         return False
-    index, home_id, away_id, kickoff = meta
+    index, home_id, away_id, kickoff = meta.index, meta.home_id, meta.away_id, meta.kickoff
     if kind == "xg":
         home_xg, away_xg, home_xga, away_xga = team_expected_goals(payload, home_id, away_id)
         _assign(frame, index, "home_xg", home_xg)
@@ -227,8 +366,18 @@ def _assign(frame: pd.DataFrame, index: int, column: str, value: float | None) -
     frame.at[index, column] = value
 
 
-def _fixture_lookup(frame: pd.DataFrame) -> dict[int, tuple[int, int, int, pd.Timestamp | None]]:
-    lookup: dict[int, tuple[int, int, int, pd.Timestamp | None]] = {}
+@dataclass(frozen=True)
+class _FixtureMeta:
+    index: int
+    home_id: int
+    away_id: int
+    kickoff: pd.Timestamp | None
+    home_name: str
+    away_name: str
+
+
+def _fixture_lookup(frame: pd.DataFrame) -> dict[int, _FixtureMeta]:
+    lookup: dict[int, _FixtureMeta] = {}
     for index, row in frame.iterrows():
         try:
             fixture_id = int(row["fixture_id"])
@@ -238,8 +387,54 @@ def _fixture_lookup(frame: pd.DataFrame) -> dict[int, tuple[int, int, int, pd.Ti
             continue
         kickoff = row["starting_at"]
         stamp = None if pd.isna(kickoff) else pd.Timestamp(kickoff)
-        lookup[fixture_id] = (int(index), home_id, away_id, stamp)
+        lookup[fixture_id] = _FixtureMeta(
+            int(index),
+            home_id,
+            away_id,
+            stamp,
+            _team_text(row, "home_team_name"),
+            _team_text(row, "away_team_name"),
+        )
     return lookup
+
+
+def _team_text(row, name: str) -> str:
+    if name not in getattr(row, "index", ()):
+        return ""
+    value = row[name]
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return ""
+    return str(value)
+
+
+def _stale_quote_ids(frame: pd.DataFrame, quotes: dict) -> set[int]:
+    """Records parsed by an older parser, including records with no version."""
+
+    stale: set[int] = set()
+    if "fixture_id" not in frame.columns:
+        return stale
+    for fixture_id in frame["fixture_id"].tolist():
+        try:
+            key = int(fixture_id)
+        except (TypeError, ValueError):
+            continue
+        record = quotes.get(str(key))
+        if not isinstance(record, dict):
+            continue
+        try:
+            version = int(record.get("parser_version") or 0)
+        except (TypeError, ValueError):
+            version = 0
+        if version != PARSER_VERSION:
+            stale.add(key)
+    return stale
+
+
+def _stamp_parser_version(store: dict, fixture_ids: list[int]) -> None:
+    for fixture_id in fixture_ids:
+        record = store.get(str(fixture_id))
+        if isinstance(record, dict):
+            record["parser_version"] = PARSER_VERSION
 
 
 def _field(row, name: str):

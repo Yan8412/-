@@ -28,7 +28,15 @@ from laliga.data.fetch import fetch_historical, fetch_window
 from laliga.data.store import MatchStore
 from laliga.model.dixon_coles import FitError
 from laliga.model.service import fit_models
-from laliga.pipeline import archive_scored, dashboard_items, score_fixtures, split_kickoff, write_dashboard_latest
+from laliga.pipeline import (
+    annotate_market_items,
+    archive_alternative_tracks,
+    archive_scored,
+    dashboard_items,
+    score_fixtures,
+    split_kickoff,
+    write_dashboard_latest,
+)
 from laliga.schedule import scheduled_between, select_next_matchday
 
 WEB_MAX_ITER = 80
@@ -191,11 +199,13 @@ def _register(app: Flask) -> None:
     def backtest_page():
         payload = _read_json(store().predictions_dir / "backtest.json")
         comparison = None if demo() else _load_comparison(store().predictions_dir / "model_comparison.json")
+        tracks_payload = None if demo() else _load_tracks(store().predictions_dir / "tracks_comparison.json")
         return render_template(
             "backtest.html",
             report=payload,
             rows=_metric_rows(payload) if payload else [],
             comparison=_comparison_view(comparison) if comparison else None,
+            tracks=_tracks_view(tracks_payload) if tracks_payload else None,
         )
 
     @app.get("/data")
@@ -247,7 +257,7 @@ def _register(app: Flask) -> None:
             if min_train < 4:
                 raise FitError("最少训练场次至少为 4。")
             history = _require_finished(store())
-            built = reconstruct_season(history, _web_config(min_train=min_train))
+            built = reconstruct_season(history, _web_config(min_train=min_train, root=store().root))
             if not built.records:
                 raise FitError(
                     f"本赛季没有可以重建的完场比赛（跳过 {built.skipped_days} 个训练样本不足的比赛日）。"
@@ -308,7 +318,7 @@ def _register(app: Flask) -> None:
     def start_train():
         def work() -> str:
             history = _require_finished(store())
-            config = _web_config(min_train=4)
+            config = _web_config(min_train=4, root=store().root)
             as_of = pd.Timestamp(history.loc[history["status"] == "finished", "starting_at"].max()) + pd.Timedelta(seconds=1)
             model = fit_models(history, as_of, config)
             store().save_model_document(model.to_dict())
@@ -332,7 +342,7 @@ def _register(app: Flask) -> None:
             if min_train < 4:
                 raise FitError("最少训练场次至少为 4。")
             history = _require_finished(store())
-            report = walk_forward(history, _web_config(min_train=min_train))
+            report = walk_forward(history, _web_config(min_train=min_train, root=store().root))
             _write_backtest(store(), report)
             logging.getLogger("laliga.webapp").info("回测完成，评测 %s 场。", report.model.n)
             return "/backtest"
@@ -422,8 +432,13 @@ class _JobHandler(logging.Handler):
         self.job.add(self.format(record))
 
 
-def _web_config(*, min_train: int) -> ModelConfig:
-    return ModelConfig(max_iter=WEB_MAX_ITER, min_train_matches=min_train, min_ht_matches=20)
+def _web_config(*, min_train: int, root: Path | None = None) -> ModelConfig:
+    config = ModelConfig(max_iter=WEB_MAX_ITER, min_train_matches=min_train, min_ht_matches=20)
+    if root is None:
+        return config
+    from laliga.upgrade import apply_champion
+
+    return apply_champion(config, root)
 
 
 def _require_finished(store: MatchStore):
@@ -465,12 +480,16 @@ def _range_fixtures(store: MatchStore, start: date, end: date, *, demo_mode: boo
 
 def _write_predictions(store: MatchStore, fixtures, label: str, note: str) -> None:
     history = store.load()
-    config = _web_config(min_train=4)
+    config = _web_config(min_train=4, root=store.root)
     log = logging.getLogger("laliga.webapp")
     scored = score_fixtures(history, fixtures, config, store, save_refit=True, notify=log.info)
     items = dashboard_items(scored)
+    from laliga.pipeline import annotate_market_items, archive_alternative_tracks
+
+    annotate_market_items(items, scored, history, store.root)
     write_dashboard_latest(store, items, label=label, note=note)
     archived = archive_scored(store, scored, history, origin=f"dashboard:{label}")
+    archive_alternative_tracks(store, scored, history, origin=f"dashboard:{label}")
     log.info("已预测 %s 场（%s）。写入预测存档 %s 场。", len(items), label, archived.accepted)
     if archived.refused:
         log.info("有 %s 场已经开球或不是未开赛状态，没有写入存档。", len(archived.refused))
@@ -490,6 +509,78 @@ def _backtest_csv(payload: dict) -> str:
     for label, model_value, baseline_value, _direction in _metric_rows(payload):
         writer.writerow([label, model_value, baseline_value])
     return buffer.getvalue()
+
+
+def _load_tracks(path: Path) -> dict | None:
+    """Return a football / market / blend report only when it was actually computed."""
+
+    payload = _read_json(path)
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("kind") != "tracks" or payload.get("schema_version") != 1:
+        return None
+    if payload.get("computed_from_stored_matches") is not True:
+        return None
+    football = (payload.get("tracks") or {}).get("football")
+    if not isinstance(football, dict):
+        return None
+    try:
+        if int(football.get("n") or 0) < 1:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return payload
+
+
+def _tracks_view(payload: dict) -> dict:
+    labels = (
+        ("football", "纯足球"),
+        ("football_on_market_rows", "纯足球（有赔率的场次）"),
+        ("market", "市场"),
+        ("market_on_blend_rows", "市场（与混合同一批比赛）"),
+        ("football_on_blend_rows", "纯足球（与混合同一批比赛）"),
+        ("blend_rates", "参数几何混合"),
+        ("blend_log", "概率对数混合"),
+    )
+
+    def num(value, digits: int = 4, percent: bool = False) -> str:
+        if value is None:
+            return "—"
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return "—"
+        if number != number:
+            return "—"
+        if percent:
+            return f"{number * 100:.1f}%"
+        return f"{number:.{digits}f}"
+
+    rows = []
+    for key, label in labels:
+        block = (payload.get("tracks") or {}).get(key) or {}
+        if not isinstance(block, dict):
+            continue
+        rows.append(
+            {
+                "label": label,
+                "ft_log_loss": num(block.get("ft_log_loss")),
+                "ft_brier": num(block.get("ft_brier")),
+                "ft_rps": num(block.get("ft_rps")),
+                "top2": num(block.get("top2_hit_rate"), 1, True),
+                "top2_htft": num(block.get("top2_htft_hit_rate"), 1, True),
+                "ht_log_loss": num(block.get("ht_log_loss")),
+                "htft_log_loss": num(block.get("htft_log_loss")),
+                "n": block.get("n") or 0,
+            }
+        )
+    return {
+        "rows": rows,
+        "notes": [str(note) for note in payload.get("notes") or []],
+        "n_football": payload.get("n_football"),
+        "n_market": payload.get("n_market"),
+        "n_blend": payload.get("n_blend"),
+    }
 
 
 def _load_comparison(path: Path) -> dict | None:
@@ -651,6 +742,7 @@ def _status(store: MatchStore) -> dict:
             "home_adv": model["ft"].get("home_adv"),
             "rho": model["ft"].get("rho"),
             "ht_source": model.get("ht_source"),
+            "joint": bool(model.get("sh")) and str(model.get("distribution") or "joint") == "joint",
         }
     return {
         "matches": int(len(frame)),

@@ -271,11 +271,21 @@ def select_shown(records: list[dict], matches: pd.DataFrame | None = None) -> di
             kickoff = min(kickoff, actual)
         if generated >= kickoff:
             continue
+        if not _is_football_track(record):
+            continue
         counts[fixture_id] = counts.get(fixture_id, 0) + 1
         current = shown.get(fixture_id)
         if current is None or generated >= _effective_time(current):
             shown[fixture_id] = record
     return {fixture_id: {**record, "n_generations": counts[fixture_id]} for fixture_id, record in shown.items()}
+
+
+def _is_football_track(record: dict) -> bool:
+    """Live hit rates stay on the football track. Other tracks are settled separately."""
+
+    extra = record.get("extra") if isinstance(record.get("extra"), dict) else {}
+    track = extra.get("track") or record.get("track") or "football"
+    return track == "football"
 
 
 def _effective_time(record: dict) -> pd.Timestamp | None:
@@ -566,6 +576,7 @@ def reconstruct_season(
                 config,
                 initial_ft=None if previous is None else previous.ft,
                 initial_ht=None if previous is None else previous.ht,
+                initial_sh=None if previous is None else previous.sh,
             )
         except FitError:
             skipped += 1

@@ -30,7 +30,11 @@ import pandas as pd
 from scipy.optimize import minimize
 from scipy.special import gammaln
 
-MODEL_VERSION = 1
+# Version 2 stores the second-half fit and the joint-distribution levers.
+# Version 1 files still load: they have no second half, so prediction stays
+# on the two independent matrices until the next train.
+MODEL_VERSION = 2
+LEGACY_MODEL_VERSIONS = frozenset({1, 2})
 
 
 class FitError(RuntimeError):

@@ -322,6 +322,7 @@ def compare_availability(
                 config,
                 initial_ft=None if previous is None else previous.ft,
                 initial_ht=None if previous is None else previous.ht,
+                initial_sh=None if previous is None else previous.sh,
             )
         except FitError:
             continue
