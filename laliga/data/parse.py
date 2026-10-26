@@ -84,13 +84,19 @@ _FULLTIME_MARKET_NAMES = {
 _OUTCOME_SIDES = {
     "home": "home",
     "1": "home",
-    "draw": "draw",
-    "tie": "draw",
-    "empate": "draw",
-    "x": "draw",
     "away": "away",
     "2": "away",
 }
+
+
+def _outcome_words() -> dict[str, str]:
+    """1X2 labels, including the same draw phrases the quotes parser accepts."""
+
+    from laliga.data.quotes import _DRAW_WORDS
+
+    sides = dict(_OUTCOME_SIDES)
+    sides.update({word: "draw" for word in _DRAW_WORDS})
+    return sides
 
 
 def empty_matches() -> pd.DataFrame:
@@ -484,7 +490,7 @@ def _is_fulltime_result_market(row: dict[str, Any]) -> bool:
 def _outcome_side(value: Any) -> str | None:
     if value is None:
         return None
-    return _OUTCOME_SIDES.get(str(value).strip().lower())
+    return _outcome_words().get(str(value).strip().lower())
 
 
 def _decimal_price(value: Any) -> float | None:

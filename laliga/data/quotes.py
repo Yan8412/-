@@ -12,12 +12,18 @@ existing 1X2 request. A missing market or a missing field leaves that block
 empty. A quote whose timestamp is at or after kickoff is dropped, including
 rows with ``stopped`` or ``winning`` set. Live rows carry ``winning: false``,
 so that field cannot separate settlement from in-play. A missing timestamp
-stays. Opening exists only when the same selection has two different prices.
-A repeated timestamp with the same price, including an all-stopped alias, is one quote.
+stays. Opening exists only when the same selection has two different prices
+and at least one of those rows is not stopped. An all-stopped selection keeps
+its latest price as the close and is not an opening, even when the price moved.
+A repeated timestamp with the same price is one quote.
 
 Direct prices (HT/FT, correct score, half-time result, half-time correct
-score, odd/even) are stored for comparison. The rate solver uses 1X2,
-over/under, and Asian handicap only.
+score, odd/even) are stored for comparison. A bookmaker's HT/FT block is kept
+only when all nine outcomes are present. A correct-score block (full time or
+half time) is kept only when it has a home win, an away win, at least 15
+labels, and a raw implied sum that is not far below 1. Anything thinner is
+dropped before de-vig, and a market with no remaining book is absent.
+The rate solver uses 1X2, over/under, and Asian handicap only.
 """
 
 from __future__ import annotations
@@ -37,7 +43,10 @@ from laliga.model.implied_goals import MarketTargets
 from laliga.model.joint import HTFT_CODES
 
 # Bump when a stored odds_quotes.json record must be parsed again from the cached raw payload.
-PARSER_VERSION = 3
+PARSER_VERSION = 4
+# A correct-score book thinner than this is a stopped fragment, not a market.
+_CS_MIN_LABELS = 15
+_CS_MIN_RAW_SUM = 0.85
 _TEAM_NAMES: contextvars.ContextVar[tuple[str, str]] = contextvars.ContextVar("laliga_team_names", default=("", ""))
 
 MARKET_NAMES = {
@@ -59,13 +68,25 @@ EXTENDED_FILTER = "markets:" + ",".join(str(market_id) for market_id in EXTENDED
 _SCORE_RE = re.compile(r"(\d+)\s*[-:]\s*(\d+)")
 _NUMBER_RE = re.compile(r"[+-]?\d+(?:\.\d+)?")
 _BARE_SIDE = frozenset({"home", "away", "draw", "over", "under", "odd", "even", "1", "2", "x", "yes", "no"})
+# Exact side tokens. ``Match nul - Real Sociedad`` splits on `` - ``, so the
+# left token is the whole draw phrase, not the single word ``match``.
+_DRAW_WORDS = (
+    "draw",
+    "tie",
+    "x",
+    "empate",
+    "match nul",
+    "matchnul",
+    "nul",
+    "unentschieden",
+    "pareggio",
+    "gelijkspel",
+    "remis",
+    "the draw",
+)
 _SIDE = {
     "home": "home",
     "1": "home",
-    "draw": "draw",
-    "tie": "draw",
-    "empate": "draw",
-    "x": "draw",
     "away": "away",
     "2": "away",
     "over": "over",
@@ -73,16 +94,14 @@ _SIDE = {
     "odd": "odd",
     "even": "even",
 }
+_SIDE.update({word: "draw" for word in _DRAW_WORDS})
 _HTFT_WORDS = {
     "home": "1",
     "1": "1",
-    "draw": "X",
-    "tie": "X",
-    "empate": "X",
-    "x": "X",
     "away": "2",
     "2": "2",
 }
+_HTFT_WORDS.update({word: "X" for word in _DRAW_WORDS})
 
 
 def quotes_path(root: Path) -> Path:
@@ -227,10 +246,10 @@ def _parse_odds_rows(rows: list[dict], *, kickoff_ts, home_id: int, away_id: int
     keep(28, "ht_ou", _totals_market(by_market.get(28, ())))
     keep(6, "ah", _handicap_market(by_market.get(6, ())))
     keep(26, "ht_ah", _handicap_market(by_market.get(26, ())))
-    keep(29, "htft", _labelled_market(by_market.get(29, ()), _htft_label))
-    keep(57, "correct_score", _labelled_market(by_market.get(57, ()), _score_label))
-    keep(30, "ht_correct_score", _labelled_market(by_market.get(30, ()), _score_label))
-    keep(12, "odd_even", _labelled_market(by_market.get(12, ()), _odd_even_label))
+    keep(29, "htft", _labelled_market(by_market.get(29, ()), _htft_label, accept=_accept_htft))
+    keep(57, "correct_score", _labelled_market(by_market.get(57, ()), _score_label, accept=_accept_correct_score))
+    keep(30, "ht_correct_score", _labelled_market(by_market.get(30, ()), _score_label, accept=_accept_correct_score))
+    keep(12, "odd_even", _labelled_market(by_market.get(12, ()), _odd_even_label, accept=_accept_odd_even))
     bundle["opening_and_closing"] = any(market_history.values())
     return bundle
 
@@ -302,7 +321,10 @@ def direct_probabilities(bundle: dict | None, *, when: str = "closing") -> dict[
         if not isinstance(labels, dict) or not labels:
             continue
         found[key] = {"probs": {str(name): float(value) for name, value in labels.items()}, "complete": bool(snapshot.get("complete"))}
-        if required is not None:
+        if key in ("correct_score", "ht_correct_score"):
+            # Old files can say complete after renormalising a handful of draws.
+            found[key]["complete"] = _score_probs_complete(found[key]["probs"])
+        elif required is not None:
             found[key]["complete"] = required.issubset(found[key]["probs"])
     return found
 
@@ -355,11 +377,11 @@ def _handicap_market(rows) -> dict | None:
     history = False
     for items in by_book.values():
         convention = _ah_convention(items)
-        atoms: dict[tuple, list[tuple[pd.Timestamp, float]]] = {}
-        for _book, stamp, side, line, price, _stopped in items:
+        atoms: dict[tuple, list[tuple]] = {}
+        for _book, stamp, side, line, price, stopped in items:
             home_line = line if convention == "home" or side == "home" else -line
-            atoms.setdefault((_line_key(home_line), side), []).append((stamp, price))
-        book_history = any(_prices_differ(quotes) for quotes in atoms.values())
+            atoms.setdefault((_line_key(home_line), side), []).append((stamp, price, stopped))
+        book_history = any(_book_moved(quotes) for quotes in atoms.values())
         history = history or book_history
         closing_books.append(_handicap_book(atoms, earliest=False))
         if book_history:
@@ -378,26 +400,82 @@ def _handicap_market(rows) -> dict | None:
     }
 
 
-def _labelled_market(rows, labeler) -> dict | None:
-    opening, closing, history = _book_snapshots(rows, lambda row: labeler(row))
-    if not closing:
+def _labelled_market(rows, labeler, *, accept) -> dict | None:
+    """Average the bookmakers that pass ``accept``. A rejected book is not stored.
+
+    Opening uses the same gate. A six-label correct-score book must not become
+    an opening distribution just because a later book quoted the full grid.
+    When nothing passes, the market key is absent.
+    """
+
+    closing_books = []
+    opening_books = []
+    for book in _labelled_books(rows, labeler):
+        if not accept(book["closing"]):
+            continue
+        closing_books.append(book["closing"])
+        if book["history"] and book["opening"] and accept(book["opening"]):
+            opening_books.append(book["opening"])
+    if not closing_books:
         return None
-    return {
-        "closing": _average_labels(closing),
-        "opening": _average_labels(opening or []),
-        "history": history,
-    }
+    closing = _average_labels(closing_books)
+    if not closing.get("probs"):
+        return None
+    closing["complete"] = True
+    opening = None
+    history = False
+    if opening_books:
+        snapshot = _average_labels(opening_books)
+        if snapshot.get("probs"):
+            snapshot["complete"] = True
+            opening = snapshot
+            history = True
+    return {"closing": closing, "opening": opening, "history": history}
+
+
+def _labelled_books(rows, labeler) -> list[dict]:
+    found = []
+    for atoms in _group_atoms(rows, labeler).values():
+        live = {key: quotes for key, quotes in ((key, _without_stopped_duplicates(quotes)) for key, quotes in atoms.items()) if quotes}
+        if not live:
+            continue
+        history = any(_book_moved(quotes) for quotes in atoms.values())
+        closing = _book_from_atoms(live, earliest=False)
+        opening = _book_from_atoms(live, earliest=True) if history else {}
+        if closing:
+            found.append({"closing": closing, "opening": opening, "history": history})
+    return found
 
 
 def _book_snapshots(rows, select):
     """Earliest and latest price of each selection.
 
-    History is true only when one selection has two different prices. The same
-    price at another time is one quote, including all-stopped alias labels.
-    Different selections updated a minute apart are still a single price.
+    History is true only when one selection has two different prices and a
+    row that is not stopped. All-stopped rows stay as the closing price.
+    The same price at another time is one quote. Different selections updated
+    a minute apart are still a single price.
     """
 
-    grouped: dict[int, dict[tuple, list[tuple[pd.Timestamp, float]]]] = {}
+    grouped = _group_atoms(rows, select)
+    if not grouped:
+        return None, None, False
+    opening_books = []
+    closing_books = []
+    history = False
+    for atoms in grouped.values():
+        live_atoms = {key: _without_stopped_duplicates(quotes) for key, quotes in atoms.items()}
+        book_history = any(_book_moved(quotes) for quotes in atoms.values())
+        history = history or book_history
+        closing_books.append(_book_from_atoms(live_atoms, earliest=False))
+        if book_history:
+            opening_books.append(_book_from_atoms(live_atoms, earliest=True))
+    opening_books = [item for item in opening_books if item]
+    closing_books = [item for item in closing_books if item]
+    return opening_books or None, closing_books or None, history
+
+
+def _group_atoms(rows, select) -> dict[int, dict[tuple, list[tuple]]]:
+    grouped: dict[int, dict[tuple, list[tuple]]] = {}
     for row in rows:
         selected = select(row)
         if not selected:
@@ -408,21 +486,15 @@ def _book_snapshots(rows, select):
         slot = grouped.setdefault(book, {})
         for key, price in _atomic(selected):
             slot.setdefault(key, []).append((stamp, float(price), stopped))
-    if not grouped:
-        return None, None, False
-    opening_books = []
-    closing_books = []
-    history = False
-    for atoms in grouped.values():
-        live_atoms = {key: _without_stopped_duplicates(quotes) for key, quotes in atoms.items()}
-        book_history = any(_prices_differ(quotes) for quotes in live_atoms.values())
-        history = history or book_history
-        closing_books.append(_book_from_atoms(live_atoms, earliest=False))
-        if book_history:
-            opening_books.append(_book_from_atoms(live_atoms, earliest=True))
-    opening_books = [item for item in opening_books if item]
-    closing_books = [item for item in closing_books if item]
-    return opening_books or None, closing_books or None, history
+    return grouped
+
+
+def _book_moved(quotes: list[tuple]) -> bool:
+    """True when a live row exists and the kept prices are not all the same."""
+
+    if not quotes or not any(not item[2] for item in quotes):
+        return False
+    return _prices_differ(_without_stopped_duplicates(quotes))
 
 
 def _atomic(selected: dict) -> list[tuple[tuple, float]]:
@@ -547,6 +619,70 @@ def _average_handicaps(books: list[dict]) -> list[dict]:
             }
         )
     return lines
+
+
+def _accept_htft(book: dict) -> bool:
+    return set(HTFT_CODES).issubset(book)
+
+
+def _accept_odd_even(book: dict) -> bool:
+    return "odd" in book and "even" in book
+
+
+def _accept_correct_score(book: dict) -> bool:
+    """Drop a book that is only level scores, or too thin to be a score grid.
+
+    Home-win and away-win labels both have to be present. Fewer than 15
+    labels, or a raw implied sum far below 1, is the stopped fragment seen
+    when the other scores were in-play and already dropped.
+    """
+
+    home_win = away_win = False
+    labels = 0
+    raw_sum = 0.0
+    for label, price in book.items():
+        pair = _score_pair(str(label))
+        if pair is None:
+            continue
+        try:
+            decimal = float(price)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(decimal) or decimal <= 1.0:
+            continue
+        labels += 1
+        raw_sum += 1.0 / decimal
+        home, away = pair
+        if home > away:
+            home_win = True
+        elif away > home:
+            away_win = True
+    return bool(home_win and away_win and labels >= _CS_MIN_LABELS and raw_sum >= _CS_MIN_RAW_SUM)
+
+
+def _score_probs_complete(probs: dict) -> bool:
+    """Coverage check for an already de-vigged score snapshot."""
+
+    home_win = away_win = False
+    counted = 0
+    for label in probs:
+        pair = _score_pair(str(label))
+        if pair is None:
+            continue
+        counted += 1
+        home, away = pair
+        if home > away:
+            home_win = True
+        elif away > home:
+            away_win = True
+    return bool(home_win and away_win and counted >= _CS_MIN_LABELS)
+
+
+def _score_pair(label: str) -> tuple[int, int] | None:
+    match = _SCORE_RE.fullmatch(str(label).strip().replace(" ", ""))
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def _average_labels(books: list[dict]) -> dict:

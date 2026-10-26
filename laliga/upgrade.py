@@ -29,8 +29,7 @@ from laliga.model.dixon_coles import FitError
 from laliga.model.joint import temper_matrix
 from laliga.model.metrics import multiclass_log_loss, multiclass_rps, outcome_index
 from laliga.model.service import ScorelineModel, fit_models
-from laliga.model.tracks import TRACK_MAX_FT, TRACK_MAX_HALF, TRACK_TEMPERATURE, geometric_rates, market_rates_for_row
-from laliga.model.joint import convolve
+from laliga.model.tracks import TRACK_MAX_FT, TRACK_MAX_HALF, TRACK_TEMPERATURE, blend_forecast, market_rates_for_row
 
 REGISTRY_SCHEMA = 1
 
@@ -413,12 +412,7 @@ def _score(model: ScorelineModel, holdout: pd.DataFrame, quotes: dict, blend_wei
             )
             market_probs.append(forecast.ft_probs)
             if rates is not None and blend_weight > 0:
-                blended = geometric_rates(rates, implied.half_rates(), blend_weight)
-                blend_probs.append(
-                    convolve(
-                        blended, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE
-                    ).ft_probs
-                )
+                blend_probs.append(blend_forecast(rates, implied, blend_weight).ft_probs)
     y_arr = np.array(y, dtype=int)
     football = _pack(y_arr, np.array(football_probs, dtype=float), top2_hit)
     if ht_probs:

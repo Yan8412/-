@@ -23,6 +23,9 @@ from laliga.model.tracks import _weight_summary
 from laliga.pipeline import ScoredFixture, describe_alternative_tracks
 
 
+_NINE = ("1/1", "1/X", "1/2", "X/1", "X/X", "X/2", "2/1", "2/X", "2/2")
+
+
 def _row(market_id, label, value, stamp, **extra):
     payload = {
         "market_id": market_id,
@@ -35,47 +38,91 @@ def _row(market_id, label, value, stamp, **extra):
     return payload
 
 
+def _with_other_htft(rows, stamp, covered, *, bookmaker_id=2):
+    """Pad a book to all nine HT/FT codes. ``covered`` must come from the rows under test."""
+
+    extra = list(rows)
+    for code in _NINE:
+        if code in covered:
+            continue
+        extra.append(_row(29, code, "40", stamp, name=code, bookmaker_id=bookmaker_id))
+    return extra
+
+
+def _score_rows(market_id, stamp, *, bookmaker_id=2, price="20", stopped=False, high=5):
+    rows = []
+    for home in range(high):
+        for away in range(high):
+            label = f"{home}-{away}"
+            rows.append(
+                _row(
+                    market_id,
+                    label,
+                    price,
+                    stamp,
+                    name=label,
+                    bookmaker_id=bookmaker_id,
+                    stopped=stopped,
+                )
+            )
+    return rows
+
+
 def test_htft_reads_name_not_the_team_label():
     stamp = "2026-10-18T12:00:00Z"
+    named = [
+        _row(
+            29,
+            "Sevilla - Osasuna",
+            "41.00",
+            stamp,
+            name="Home/Away",
+            market_description="Half Time/Full Time",
+        ),
+        _row(29, "Sevilla - Osasuna", "5.00", stamp, name="Home/Draw", market_description="Half Time/Full Time"),
+    ]
+    kickoff = "2026-10-18T19:00:00Z"
+    assert "htft" not in parse_odds_rows(named, kickoff=kickoff, home_id=1, away_id=2)
     bundle = parse_odds_rows(
-        [
-            _row(
-                29,
-                "Sevilla - Osasuna",
-                "41.00",
-                stamp,
-                name="Home/Away",
-                market_description="Half Time/Full Time",
-            ),
-            _row(29, "Sevilla - Osasuna", "5.00", stamp, name="Home/Draw", market_description="Half Time/Full Time"),
-        ],
-        kickoff="2026-10-18T19:00:00Z",
+        _with_other_htft(named, stamp, {"1/2", "1/X"}),
+        kickoff=kickoff,
         home_id=1,
         away_id=2,
     )
     probs = bundle["htft"]["closing"]["probs"]
-    assert set(probs) == {"1/2", "1/X"}
+    assert {"1/2", "1/X"} <= set(probs)
+    assert len(probs) == 9
+    assert bundle["htft"]["closing"]["complete"] is True
     assert "Sevilla" not in "".join(probs)
 
 
 def test_correct_score_name_is_from_the_winners_perspective():
+    from laliga.data.quotes import _score_label
+
     late = "2026-10-18T16:00:00Z"
-    rows = [
-        _row(57, "2", "8.50", late, name="2-1", bookmaker_id=2),
-        _row(57, "1", "6.00", late, name="2-1", bookmaker_id=2),
-        _row(57, "Draw", "7.00", late, name="1-1", bookmaker_id=2),
-        _row(57, "1:2", "8.50", late, name="1:2", bookmaker_id=9),
-        _row(57, "3:3", "25", late, name="3:3", bookmaker_id=9),
-        _row(30, "2", "9.00", late, name="2-1", bookmaker_id=2),
-        _row(30, "Draw", "6.50", late, name="0-0", bookmaker_id=2),
-    ]
+    assert _score_label({"label": "2", "name": "2-1", "value": "8.50"}) == {"1-2": 8.50}
+    assert _score_label({"label": "1", "name": "2-1", "value": "6.00"}) == {"2-1": 6.00}
+    assert _score_label({"label": "Draw", "name": "1-1", "value": "7.00"}) == {"1-1": 7.00}
+    assert _score_label({"label": "1:2", "name": "1:2", "value": "8.50"}) == {"1-2": 8.50}
+    assert _score_label({"label": "Tie", "name": "2-1", "value": "12"}) == {}
+    rows = _score_rows(57, late, bookmaker_id=2, price="12")
+    rows.extend(
+        [
+            _row(57, "2", "8.50", late, name="2-1", bookmaker_id=2),
+            _row(57, "1", "6.00", late, name="2-1", bookmaker_id=2),
+            _row(57, "Draw", "7.00", late, name="1-1", bookmaker_id=2),
+            _row(57, "3:3", "25", late, name="3:3", bookmaker_id=2),
+            _row(30, "2", "9.00", late, name="2-1", bookmaker_id=2),
+            _row(30, "Draw", "6.50", late, name="0-0", bookmaker_id=2),
+        ]
+    )
     bundle = parse_odds_rows(rows, kickoff="2026-10-18T19:00:00Z", home_id=1, away_id=2)
     scores = bundle["correct_score"]["closing"]["probs"]
     assert "1-2" in scores
     assert "2-1" in scores
     assert "1-1" in scores
     assert "3-3" in scores
-    assert set(bundle["ht_correct_score"]["closing"]["probs"]) == {"1-2", "0-0"}
+    assert "ht_correct_score" not in bundle
 
 
 def test_asian_handicap_detects_home_line_and_own_line_books():
@@ -196,6 +243,8 @@ def test_post_kickoff_rows_are_dropped_even_when_winning_is_false():
 
 
 def test_correct_score_is_devigged_per_book_before_averaging():
+    from laliga.data.quotes import _average_labels
+
     late = "2026-10-18T16:00:00Z"
     rows = [
         _row(57, "1-0", "2.0", late, name="1-0", bookmaker_id=9),
@@ -204,7 +253,8 @@ def test_correct_score_is_devigged_per_book_before_averaging():
         _row(57, "0-1", "1.5", late, name="0-1", bookmaker_id=16),
     ]
     bundle = parse_odds_rows(rows, kickoff="2026-10-18T19:00:00Z", home_id=1, away_id=2)
-    probs = bundle["correct_score"]["closing"]["probs"]
+    assert "correct_score" not in bundle
+    probs = _average_labels([{"1-0": 2.0, "0-0": 2.0}, {"1-0": 3.0, "0-1": 1.5}])["probs"]
     assert sum(probs.values()) == pytest.approx(1.0)
     book_a = {"1-0": 0.5, "0-0": 0.5}
     book_b = {"1-0": (1 / 3) / 1.0, "0-1": (1 / 1.5) / 1.0}
@@ -390,51 +440,65 @@ def test_htft_team_labels_map_when_name_is_null():
 
     stamp = "2024-08-18T12:00:00Z"
     kickoff = "2024-08-18T19:00:00Z"
-    valencia = parse_odds_rows(
-        [
-            _row(
-                29,
-                "Draw - Valencia",
-                "6.50",
-                stamp,
-                name=None,
-                original_label=None,
-                id=131425640745,
-                bookmaker_id=2,
-            ),
-            _row(29, "Valencia - Draw", "7.00", stamp, name=None, original_label=None, bookmaker_id=2),
-        ],
+    valencia_rows = [
+        _row(
+            29,
+            "Draw - Valencia",
+            "6.50",
+            stamp,
+            name=None,
+            original_label=None,
+            id=131425640745,
+            bookmaker_id=2,
+        ),
+        _row(29, "Valencia - Draw", "7.00", stamp, name=None, original_label=None, bookmaker_id=2),
+    ]
+    assert "htft" not in parse_odds_rows(
+        valencia_rows,
         kickoff=kickoff,
         home_id=1,
         away_id=2,
         home_name="Real Sociedad",
         away_name="Valencia",
     )
-    assert set(valencia["htft"]["closing"]["probs"]) == {"X/2", "2/X"}
+    valencia = parse_odds_rows(
+        _with_other_htft(valencia_rows, stamp, {"X/2", "2/X"}),
+        kickoff=kickoff,
+        home_id=1,
+        away_id=2,
+        home_name="Real Sociedad",
+        away_name="Valencia",
+    )
+    assert {"X/2", "2/X"} <= set(valencia["htft"]["closing"]["probs"])
+    assert len(valencia["htft"]["closing"]["probs"]) == 9
+    athletic_rows = [
+        _row(29, "Draw - Athletic Bilbao", "5.50", stamp, name=None, original_label=None, bookmaker_id=2),
+        _row(29, "Athletic Club - Draw", "6.00", stamp, name=None, original_label=None, bookmaker_id=2),
+    ]
     athletic = parse_odds_rows(
-        [
-            _row(29, "Draw - Athletic Bilbao", "5.50", stamp, name=None, original_label=None, bookmaker_id=2),
-            _row(29, "Athletic Club - Draw", "6.00", stamp, name=None, original_label=None, bookmaker_id=2),
-        ],
+        _with_other_htft(athletic_rows, stamp, {"X/1", "1/X"}),
         kickoff=kickoff,
         home_id=3,
         away_id=4,
         home_name="Athletic Club",
         away_name="Real Madrid",
     )
-    assert set(athletic["htft"]["closing"]["probs"]) == {"X/1", "1/X"}
+    assert {"X/1", "1/X"} <= set(athletic["htft"]["closing"]["probs"])
+    assert len(athletic["htft"]["closing"]["probs"]) == 9
+    named_rows = [
+        _row(29, "Draw - Valencia", "6.00", stamp, name="Draw/Home", bookmaker_id=2),
+        _row(29, "Valencia - Draw", "7.00", stamp, name="Home/Away", bookmaker_id=2),
+    ]
     named = parse_odds_rows(
-        [
-            _row(29, "Draw - Valencia", "6.00", stamp, name="Draw/Home", bookmaker_id=2),
-            _row(29, "Valencia - Draw", "7.00", stamp, name="Home/Away", bookmaker_id=2),
-        ],
+        _with_other_htft(named_rows, stamp, {"X/1", "1/2"}),
         kickoff=kickoff,
         home_id=1,
         away_id=2,
         home_name="Real Sociedad",
         away_name="Valencia",
     )
-    assert set(named["htft"]["closing"]["probs"]) == {"X/1", "1/2"}
+    assert {"X/1", "1/2"} <= set(named["htft"]["closing"]["probs"])
+    assert len(named["htft"]["closing"]["probs"]) == 9
     assert same_club("Athletic Club", "Athletic Bilbao")
     assert same_club("Athletic", "Athletic Bilbao")
     assert not same_club("Deportivo", "Deportivo Alavés")
@@ -444,23 +508,18 @@ def test_stopped_duplicate_with_an_alias_is_not_opening_history():
     early = "2026-10-18T16:46:00Z"
     late = "2026-10-18T21:49:00Z"
     kickoff = "2026-10-19T19:00:00Z"
-    scores = parse_odds_rows(
-        [
-            _row(57, "Tie", "8.00", early, name="0-0", stopped=True, bookmaker_id=2),
-            _row(57, "Draw", "9.00", late, name="0-0", stopped=False, bookmaker_id=2),
-            _row(57, "1", "6.00", late, name="1-0", stopped=False, bookmaker_id=2),
-            _row(57, "Tie", "12.00", late, name="2-1", stopped=False, bookmaker_id=2),
-        ],
-        kickoff=kickoff,
-        home_id=1,
-        away_id=2,
-    )
-    probs = scores["correct_score"]["closing"]["probs"]
-    assert "2-1" not in probs
+    from laliga.data.quotes import _score_label
+
+    assert _score_label({"label": "Tie", "name": "2-1", "value": "12"}) == {}
+    score_rows = _score_rows(57, late, price="9.00")
+    score_rows.append(_row(57, "Tie", "8.00", early, name="0-0", stopped=True, bookmaker_id=2))
+    score_rows.append(_row(57, "Tie", "12.00", late, name="2-1", stopped=False, bookmaker_id=2))
+    scores = parse_odds_rows(score_rows, kickoff=kickoff, home_id=1, away_id=2)
     assert scores["correct_score"]["history"] is False
+    assert scores["correct_score"]["opening"] is None
     assert scores["opening_and_closing"] is False
-    fair = devig_vector([1 / 9.0, 1 / 6.0], ("proportional",))
-    assert probs["0-0"] == pytest.approx(float(fair["proportional"][0]))
+    # The stopped 8.00 is dropped because a live 9.00 exists, so every label stays 9.00.
+    assert len(set(round(value, 6) for value in scores["correct_score"]["closing"]["probs"].values())) == 1
     result = parse_odds_rows(
         [
             _row(1, "1", "2.05", late, bookmaker_id=2),
@@ -504,8 +563,9 @@ def test_stopped_duplicate_with_an_alias_is_not_opening_history():
         home_id=1,
         away_id=2,
     )
-    assert only_stopped["opening_and_closing"] is True
-    assert only_stopped["ft_1x2"]["opening"]["raw"]["home"] == pytest.approx(1 / 2.20)
+    assert only_stopped["opening_and_closing"] is False
+    assert only_stopped["ft_1x2"]["history"] is False
+    assert only_stopped["ft_1x2"]["opening"] is None
     assert only_stopped["ft_1x2"]["closing"]["raw"]["home"] == pytest.approx(1 / 2.05)
 
 
@@ -624,7 +684,7 @@ def test_stale_parser_version_is_reparsed_without_refresh(tmp_path, caplog):
     record = load_quotes(tmp_path)["19135350"]
     assert record["parser_version"] == PARSER_VERSION
     assert "9/9" not in str(record)
-    assert set(record["htft"]["closing"]["probs"]) == {"X/2", "2/X"}
+    assert "htft" not in record
     assert "回填扩展盘" in caplog.text
     second = fetch_stored_markets(client, store)
     assert second.odds_requested == 0
@@ -633,30 +693,34 @@ def test_stale_parser_version_is_reparsed_without_refresh(tmp_path, caplog):
 def test_empate_is_draw_and_same_prices_are_not_an_opening():
     stamp = "2026-01-26T12:00:00Z"
     kickoff = "2026-01-26T20:00:00Z"
+    barcelona_rows = [
+        _row(29, "Empate - Barcelona", "6.50", stamp, name=None, original_label=None, bookmaker_id=2),
+        _row(29, "Barcelona - Empate", "7.00", stamp, name=None, original_label=None, bookmaker_id=2),
+    ]
     barcelona = parse_odds_rows(
-        [
-            _row(29, "Empate - Barcelona", "6.50", stamp, name=None, original_label=None, bookmaker_id=2),
-            _row(29, "Barcelona - Empate", "7.00", stamp, name=None, original_label=None, bookmaker_id=2),
-        ],
+        _with_other_htft(barcelona_rows, stamp, {"X/1", "1/X"}),
         kickoff=kickoff,
         home_id=1,
         away_id=2,
         home_name="Barcelona",
         away_name="Levante",
     )
-    assert set(barcelona["htft"]["closing"]["probs"]) == {"X/1", "1/X"}
+    assert {"X/1", "1/X"} <= set(barcelona["htft"]["closing"]["probs"])
+    assert len(barcelona["htft"]["closing"]["probs"]) == 9
+    osasuna_rows = [
+        _row(29, "Osasuna - Empate", "5.50", stamp, name=None, original_label=None, bookmaker_id=2),
+        _row(29, "Empate - Osasuna", "6.00", stamp, name=None, original_label=None, bookmaker_id=2),
+    ]
     osasuna = parse_odds_rows(
-        [
-            _row(29, "Osasuna - Empate", "5.50", stamp, name=None, original_label=None, bookmaker_id=2),
-            _row(29, "Empate - Osasuna", "6.00", stamp, name=None, original_label=None, bookmaker_id=2),
-        ],
+        _with_other_htft(osasuna_rows, stamp, {"1/X", "X/1"}),
         kickoff=kickoff,
         home_id=3,
         away_id=4,
         home_name="Osasuna",
         away_name="Real Madrid",
     )
-    assert set(osasuna["htft"]["closing"]["probs"]) == {"1/X", "X/1"}
+    assert {"1/X", "X/1"} <= set(osasuna["htft"]["closing"]["probs"])
+    assert len(osasuna["htft"]["closing"]["probs"]) == 9
     # Fixture 19439499: Draw live, Tie and Empate stopped, all 3.00 on 0-0.
     scores = parse_odds_rows(
         [
@@ -670,8 +734,7 @@ def test_empate_is_draw_and_same_prices_are_not_an_opening():
         away_id=2,
     )
     assert scores["opening_and_closing"] is False
-    assert scores["ht_correct_score"]["history"] is False
-    assert "0-0" in scores["ht_correct_score"]["closing"]["probs"]
+    assert "ht_correct_score" not in scores
     # Fixture 19439470: both labels stopped, same 1-0 price, Athletic aliases.
     athletic = parse_odds_rows(
         [
@@ -686,7 +749,7 @@ def test_empate_is_draw_and_same_prices_are_not_an_opening():
         away_name="Real Madrid",
     )
     assert athletic["opening_and_closing"] is False
-    assert "1-0" in athletic["ht_correct_score"]["closing"]["probs"]
+    assert "ht_correct_score" not in athletic
     moved = parse_odds_rows(
         [
             _row(30, "Athletic Club", "3.50", "2026-01-26T17:21:50Z", name="1-0", stopped=True, bookmaker_id=2),
@@ -699,8 +762,8 @@ def test_empate_is_draw_and_same_prices_are_not_an_opening():
         home_name="Athletic Club",
         away_name="Real Madrid",
     )
-    assert moved["ht_correct_score"]["history"] is True
-    assert moved["opening_and_closing"] is True
+    assert "ht_correct_score" not in moved
+    assert moved["opening_and_closing"] is False
 
 
 def test_prematch_timestamps_parse_without_a_per_row_pandas_call():
@@ -722,3 +785,143 @@ def test_prematch_timestamps_parse_without_a_per_row_pandas_call():
     elapsed = time.perf_counter() - started
     assert kept == 10000
     assert elapsed < 1.0
+
+
+def test_partial_books_are_absent_and_all_stopped_rows_are_not_an_opening():
+    """Fixtures 19439490–19439497 and 19439492/19439496/19439507."""
+
+    from laliga.data.quotes import direct_probabilities
+    from laliga.model.tracks import _direct_block
+
+    late = "2026-02-22T18:00:00Z"
+    early = "2026-02-19T15:06:00Z"
+    mid = "2026-02-22T11:10:00Z"
+    kickoff = "2026-02-22T20:00:00Z"
+    partial = [
+        _row(29, code, "8.00", late, name=code, bookmaker_id=2, stopped=True)
+        for code in ("X/1", "1/X", "X/X", "X/2", "2/X")
+    ]
+    assert "htft" not in parse_odds_rows(partial, kickoff=kickoff, home_id=1, away_id=2)
+    both = list(partial)
+    for code in _NINE:
+        both.append(_row(29, code, "9.00", late, name=code, bookmaker_id=9))
+    kept = parse_odds_rows(both, kickoff=kickoff, home_id=1, away_id=2)
+    probs = kept["htft"]["closing"]["probs"]
+    assert set(probs) == set(_NINE)
+    assert kept["htft"]["closing"]["complete"] is True
+    assert kept["htft"]["history"] is False
+    assert kept["htft"]["opening"] is None
+    assert sum(probs.values()) == pytest.approx(1.0)
+    # Book 2's 8.00 on five codes must not move the average away from book 9.
+    assert len({round(value, 6) for value in probs.values()}) == 1
+
+    level = [_row(30, score, "6.00", late, name=score, bookmaker_id=2) for score in ("0-0", "1-1", "2-2", "3-3")]
+    assert "ht_correct_score" not in parse_odds_rows(level, kickoff=kickoff, home_id=1, away_id=2)
+
+    six = ("0-0", "1-1", "2-2", "1-0", "0-1", "2-1")
+    thin = []
+    for score in six:
+        thin.append(_row(57, score, "4.00", early, name=score, bookmaker_id=2))
+        thin.append(_row(57, score, "5.00", late, name=score, bookmaker_id=2))
+    assert "correct_score" not in parse_odds_rows(thin, kickoff=kickoff, home_id=1, away_id=2)
+    full = list(thin)
+    for home in range(11):
+        for away in range(11):
+            label = f"{home}-{away}"
+            full.append(_row(57, label, "15", late, name=label, bookmaker_id=9))
+    opened = parse_odds_rows(full, kickoff=kickoff, home_id=1, away_id=2)
+    assert opened["correct_score"]["history"] is False
+    assert opened["correct_score"]["opening"] is None
+    assert opened["correct_score"]["closing"]["complete"] is True
+    assert len(opened["correct_score"]["closing"]["probs"]) == 121
+    assert opened["opening_and_closing"] is False
+
+    stopped_scores = []
+    for home in range(5):
+        for away in range(5):
+            label = f"{home}-{away}"
+            if label == "0-0":
+                stopped_scores.append(_row(30, "Empate", "5.50", early, name="0-0", stopped=True, bookmaker_id=2))
+                stopped_scores.append(_row(30, "Tie", "6.00", mid, name="0-0", stopped=True, bookmaker_id=2))
+            else:
+                stopped_scores.append(_row(30, label, "20", mid, name=label, stopped=True, bookmaker_id=2))
+    suspended = parse_odds_rows(stopped_scores, kickoff=kickoff, home_id=1, away_id=2)
+    assert suspended["ht_correct_score"]["history"] is False
+    assert suspended["ht_correct_score"]["opening"] is None
+    assert suspended["opening_and_closing"] is False
+    raw = [1 / 6.0] + [1 / 20.0] * 24
+    fair = devig_vector(raw, ("proportional",))
+    assert suspended["ht_correct_score"]["closing"]["probs"]["0-0"] == pytest.approx(float(fair["proportional"][0]))
+    early_fair = devig_vector([1 / 5.50] + [1 / 20.0] * 24, ("proportional",))
+    assert suspended["ht_correct_score"]["closing"]["probs"]["0-0"] != pytest.approx(float(early_fair["proportional"][0]), abs=1e-4)
+
+    stopped_htft = []
+    for code in _NINE:
+        stopped_htft.append(_row(29, code, "8", early, name=code, stopped=True, bookmaker_id=2))
+        late_price = "4.0" if code == "1/1" else "12"
+        stopped_htft.append(_row(29, code, late_price, mid, name=code, stopped=True, bookmaker_id=2))
+    batches = parse_odds_rows(stopped_htft, kickoff=kickoff, home_id=1, away_id=2)
+    assert set(batches["htft"]["closing"]["probs"]) == set(_NINE)
+    assert batches["htft"]["closing"]["complete"] is True
+    assert batches["htft"]["history"] is False
+    assert batches["htft"]["opening"] is None
+    assert batches["htft"]["closing"]["probs"]["1/1"] > batches["htft"]["closing"]["probs"]["X/X"]
+
+    stored = {
+        "htft": {
+            "closing": {
+                "probs": {"X/1": 0.2, "1/X": 0.2, "X/X": 0.2, "X/2": 0.2, "2/X": 0.2},
+                "complete": True,
+            }
+        },
+        "correct_score": {"closing": {"probs": {"0-0": 0.4, "1-1": 0.3, "2-2": 0.2, "3-3": 0.1}, "complete": True}},
+        "ht_correct_score": {"closing": {"probs": {}, "complete": True}},
+    }
+    direct = direct_probabilities(stored)
+    assert direct["htft"]["complete"] is False
+    assert direct["correct_score"]["complete"] is False
+    assert "ht_correct_score" not in direct
+    scored = []
+    for index in range(6):
+        scored.append(
+            {
+                "direct": direct,
+                "htft_code": "X/X",
+                "score": (1, 1),
+                "y_ht": 1,
+            }
+        )
+    block = _direct_block(scored)
+    assert block["htft"]["n"] == 0
+    assert block["htft"]["log_loss"] is None
+    assert block["correct_score"]["n"] == 0
+
+
+def test_match_nul_maps_to_draw():
+    stamp = "2026-02-22T12:00:00Z"
+    kickoff = "2026-02-22T20:00:00Z"
+    from laliga.data.quotes import _htft_from_teams
+
+    assert _htft_from_teams("Match nul - Real Sociedad", "Real Sociedad", "Real Oviedo") == "X/1"
+    assert _htft_from_teams("Unentschieden - Valencia", "Real Sociedad", "Valencia") == "X/2"
+    rows = [_row(29, "Match nul - Real Sociedad", "6.50", stamp, name=None, original_label=None, bookmaker_id=2)]
+    bundle = parse_odds_rows(
+        _with_other_htft(rows, stamp, {"X/1"}),
+        kickoff=kickoff,
+        home_id=1,
+        away_id=2,
+        home_name="Real Sociedad",
+        away_name="Real Oviedo",
+    )
+    assert "X/1" in bundle["htft"]["closing"]["probs"]
+    assert bundle["htft"]["closing"]["complete"] is True
+    assert len(bundle["htft"]["closing"]["probs"]) == 9
+    prices = aggregate_prematch_1x2(
+        [
+            _row(1, "Home", "2.10", stamp),
+            _row(1, "Match nul", "3.40", stamp),
+            _row(1, "Away", "3.80", stamp),
+        ],
+        kickoff=kickoff,
+    )
+    assert prices["raw_implied_draw"] == pytest.approx(1 / 3.40)

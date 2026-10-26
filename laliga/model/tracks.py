@@ -21,7 +21,7 @@ from laliga.config import ModelConfig
 from laliga.data.quotes import direct_probabilities, load_quotes, targets_from_bundle, targets_from_row
 from laliga.model.blend import log_pool
 from laliga.model.dixon_coles import FitError
-from laliga.model.implied_goals import ImpliedRates, infer_rates
+from laliga.model.implied_goals import ImpliedRates, _match_closing_draw, infer_rates
 from laliga.model.joint import HTFT_CODES, HalfRates, convolve, htft_code
 from laliga.model.metrics import (
     iter_evaluation_folds,
@@ -67,14 +67,6 @@ def compare_tracks(
         )
     _attach_blends(rows, min_history=min_blend_history, notify=notify)
     payload = _summarize(rows, config, min_blend_history)
-    summary = payload.get("blend_rate_weight") or {}
-    if summary:
-        _say(
-            "参数混合的市场权重："
-            f"起点 {float(summary['start']):.2f}，终点 {float(summary['end']):.2f}，中位数 {float(summary['median']):.2f}。"
-            f"计分 {summary.get('n_days')} 个评测日、{summary.get('n_matches')} 场。",
-            notify,
-        )
     return TrackReport(payload)
 
 
@@ -111,6 +103,35 @@ def geometric_rates(football: HalfRates, market: HalfRates, market_weight: float
         rho_2=(1.0 - weight) * football.rho_2 + weight * market.rho_2,
         eta=(1.0 - weight) * football.eta + weight * market.eta,
     )
+
+
+def blend_forecast(football: HalfRates, market, weight: float, *, draw_target: float | None = None):
+    """Geometric mix, then the same closing-draw rescale as the market track.
+
+    Weight 1 uses the market half rates and the market draw, so the full-time
+    1X2 matches ``ImpliedRates.forecast`` on the track grid. Weight 0 is the
+    football convolution with no rescale. In between, the draw target moves
+    from the mixed matrix's own draw toward the closing draw.
+    """
+
+    if isinstance(market, ImpliedRates):
+        market_rates = market.half_rates(0.0)
+        if draw_target is None:
+            draw_target = market.draw_target
+    else:
+        market_rates = market
+    weight = float(np.clip(weight, 0.0, 1.0))
+    if weight >= 1.0 - 1e-12:
+        rates = market_rates
+    elif weight <= 1e-12:
+        rates = football
+    else:
+        rates = geometric_rates(football, market_rates, weight)
+    forecast = convolve(rates, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE)
+    if draw_target is None or weight <= 1e-12:
+        return forecast
+    mixed = (1.0 - weight) * float(forecast.ft_probs[1]) + weight * float(draw_target)
+    return _match_closing_draw(forecast, mixed)
 
 
 def _walk(finished: pd.DataFrame, config: ModelConfig, quotes: dict, *, refit_every_days: int, notify=None) -> list[dict]:
@@ -196,6 +217,7 @@ def _one(match, model: ScorelineModel, quotes: dict, as_of: pd.Timestamp) -> dic
         "market_htft": market_htft,
         "market_top2_htft": market_top2_htft if implied is not None else None,
         "market_rates": market_rates,
+        "market_draw_target": None if implied is None else implied.draw_target,
         "direct": direct,
     }
 
@@ -215,10 +237,12 @@ def _attach_blends(rows: list[dict], *, min_history: int, notify=None) -> None:
             _say(f"混合权重预计算 {index}/{len(usable)} 场", notify)
         cached = []
         for weight in grid:
-            blended = geometric_rates(row["football_rates"], row["market_rates"], weight)
             cached.append(
-                convolve(
-                    blended, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE
+                blend_forecast(
+                    row["football_rates"],
+                    row["market_rates"],
+                    weight,
+                    draw_target=row.get("market_draw_target"),
                 ).ft_probs
             )
         row["_ft_by_weight"] = cached
@@ -229,9 +253,11 @@ def _attach_blends(rows: list[dict], *, min_history: int, notify=None) -> None:
             log_weight = _best_log_weight(history, grid)
             _say(f"混合评测日 {_day}，历史 {len(history)} 场，市场权重 {weight:.2f}", notify)
             for row in day_rows:
-                blended = geometric_rates(row["football_rates"], row["market_rates"], weight)
-                forecast = convolve(
-                    blended, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE
+                forecast = blend_forecast(
+                    row["football_rates"],
+                    row["market_rates"],
+                    weight,
+                    draw_target=row.get("market_draw_target"),
                 )
                 row["blend_rate_ft"] = forecast.ft_probs
                 row["blend_rate_ht"] = forecast.ht_probs
@@ -259,10 +285,12 @@ def _best_rate_weight(history: list[dict], grid: list[float]) -> float:
         else:
             probs = []
             for row in history:
-                blended = geometric_rates(row["football_rates"], row["market_rates"], weight)
                 probs.append(
-                    convolve(
-                        blended, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE
+                    blend_forecast(
+                        row["football_rates"],
+                        row["market_rates"],
+                        weight,
+                        draw_target=row.get("market_draw_target"),
                     ).ft_probs
                 )
             probs = np.array(probs, dtype=float)

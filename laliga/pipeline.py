@@ -192,8 +192,7 @@ def describe_alternative_tracks(scored: list[ScoredFixture], history: pd.DataFra
     """Terminal lines for football, market, and blend. Nothing is written."""
 
     from laliga.data.quotes import load_quotes
-    from laliga.model.joint import convolve
-    from laliga.model.tracks import TRACK_MAX_FT, TRACK_MAX_HALF, TRACK_TEMPERATURE, geometric_rates, market_rates_for_row
+    from laliga.model.tracks import TRACK_MAX_FT, TRACK_MAX_HALF, TRACK_TEMPERATURE, blend_forecast, market_rates_for_row
     from laliga.upgrade import load_registry
 
     weight = _blend_weight(root, load_registry)
@@ -217,12 +216,7 @@ def describe_alternative_tracks(scored: list[ScoredFixture], history: pd.DataFra
         if prediction.rates is None:
             lines.append("  混合：这场没有半场速率，不能和市场价格混合。")
             continue
-        blended = convolve(
-            geometric_rates(prediction.rates, implied.half_rates(), weight),
-            max_half=TRACK_MAX_HALF,
-            max_ft=TRACK_MAX_FT,
-            temperature=TRACK_TEMPERATURE,
-        )
+        blended = blend_forecast(prediction.rates, implied, weight)
         if weight <= 0:
             lines.append(f"  混合：市场权重为 0，与纯足球相同。{_forecast_phrase(blended)}")
         else:
@@ -283,8 +277,7 @@ def annotate_market_items(items: list[dict], scored: list[ScoredFixture], histor
     """
 
     from laliga.data.quotes import load_quotes
-    from laliga.model.joint import convolve
-    from laliga.model.tracks import TRACK_MAX_FT, TRACK_MAX_HALF, TRACK_TEMPERATURE, geometric_rates, market_rates_for_row
+    from laliga.model.tracks import TRACK_MAX_FT, TRACK_MAX_HALF, TRACK_TEMPERATURE, blend_forecast, market_rates_for_row
     from laliga.upgrade import load_registry
 
     quotes = load_quotes(root)
@@ -312,12 +305,7 @@ def annotate_market_items(items: list[dict], scored: list[ScoredFixture], histor
         item["market"] = _forecast_brief(forecast)
         football = by_id.get(int(item["fixture_id"]))
         if weight > 0 and football is not None and football.prediction.rates is not None:
-            blended = convolve(
-                geometric_rates(football.prediction.rates, implied.half_rates(), weight),
-                max_half=TRACK_MAX_HALF,
-                max_ft=TRACK_MAX_FT,
-                temperature=TRACK_TEMPERATURE,
-            )
+            blended = blend_forecast(football.prediction.rates, implied, weight)
             item["blend"] = _forecast_brief(blended)
             item["blend_market_weight"] = weight
 
@@ -328,7 +316,7 @@ def archive_alternative_tracks(store: MatchStore, scored: list[ScoredFixture], h
     from laliga.archive import PredictionArchive, utc_now
     from laliga.data.quotes import load_quotes
     from laliga.model.service import MarketProb, ScoreProb
-    from laliga.model.tracks import TRACK_MAX_FT, TRACK_MAX_HALF, TRACK_TEMPERATURE, geometric_rates, market_rates_for_row
+    from laliga.model.tracks import TRACK_MAX_FT, TRACK_MAX_HALF, TRACK_TEMPERATURE, blend_forecast, market_rates_for_row
     from laliga.upgrade import load_registry
 
     quotes = load_quotes(store.root)
@@ -365,12 +353,7 @@ def archive_alternative_tracks(store: MatchStore, scored: list[ScoredFixture], h
         accepted += result.accepted
         football_rates = item.prediction.rates
         if weight > 0 and football_rates is not None:
-            blended_rates = geometric_rates(football_rates, implied.half_rates(), weight)
-            from laliga.model.joint import convolve
-
-            blended = convolve(
-                blended_rates, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE
-            )
+            blended = blend_forecast(football_rates, implied, weight)
             blend = _retarget(item.prediction, blended, MarketProb, ScoreProb, track="blend")
             blend_result = archive.append(
                 [blend],

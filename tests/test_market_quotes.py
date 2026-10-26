@@ -84,7 +84,9 @@ def test_opening_is_the_earlier_price_and_kickoff_quotes_are_dropped():
     assert targets.ah and targets.ah[0][0] == pytest.approx(-0.25)
     direct = direct_probabilities(bundle)
     assert direct["htft"]["complete"] is True
-    assert "1-0" in direct["correct_score"]["probs"]
+    # Two correct-score labels are not a market. The book is dropped before de-vig.
+    assert "correct_score" not in bundle
+    assert "correct_score" not in direct
     text = str(bundle)
     assert "api_token" not in text
 
@@ -159,6 +161,31 @@ def test_fitted_rho_and_draw_adjustment_match_the_closing_draw():
     priced_forecast = priced.forecast(max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE)
     assert priced_forecast.ft_probs[1] == pytest.approx(draw, abs=0.004)
     assert abs(priced_forecast.ft_probs[0] - home) < 0.02
+
+
+def test_blend_weight_one_matches_the_market_draw():
+    from laliga.model.joint import HalfRates, convolve
+    from laliga.model.tracks import TRACK_MAX_FT, TRACK_MAX_HALF, TRACK_TEMPERATURE, blend_forecast
+
+    lam_home, lam_away, rho = 1.45, 1.10, -0.12
+    matrix = score_matrix(lam_home, lam_away, rho, 8)
+    home, draw, away = outcome_probabilities(matrix)
+    row = {
+        "fixture_id": 19439470,
+        "odds_home": (1 / home) * 1.03,
+        "odds_draw": (1 / draw) * 1.03,
+        "odds_away": (1 / away) * 1.03,
+    }
+    rates = infer_rates(MarketTargets(ft_probs=(home, draw, away)))
+    assert rates is not None
+    market = rates.forecast(max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE)
+    football = HalfRates(0.70, 0.55, 0.80, 0.60, -0.02, -0.02, eta=0.0)
+    blended = blend_forecast(football, rates, 1.0)
+    assert blended.ft_probs == pytest.approx(market.ft_probs, abs=1e-8)
+    plain = convolve(football, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE)
+    zero = blend_forecast(football, rates, 0.0)
+    assert zero.ft_probs == pytest.approx(plain.ft_probs, abs=1e-8)
+    assert market.ft_probs[1] == pytest.approx(draw, abs=0.004)
 
 
 def test_row_without_totals_still_prices_1x2_and_optional_columns_stay_missing():
