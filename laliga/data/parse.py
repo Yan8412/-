@@ -448,12 +448,11 @@ def _price_time(row: dict[str, Any]) -> pd.Timestamp | None:
 
 
 def _is_before_kickoff(row: dict[str, Any], kickoff: pd.Timestamp | None) -> bool:
-    if kickoff is None:
-        return True
-    stamp = _price_time(row)
-    if stamp is None:
-        return True
-    return stamp < kickoff
+    """Same pre-match rule as the quotes file, including a post-kickoff settlement touch."""
+
+    from laliga.data.quotes import is_prematch_quote
+
+    return is_prematch_quote(row, kickoff)
 
 
 def _is_newer_quote(stamp: pd.Timestamp | None, previous: pd.Timestamp | None) -> bool:

@@ -133,15 +133,17 @@ def format_tracks(payload: dict) -> str:
         "football": "纯足球",
         "football_on_market_rows": "纯足球（有赔率的场次）",
         "market": "市场",
+        "market_on_blend_rows": "市场（与混合同一批比赛）",
+        "football_on_blend_rows": "纯足球（与混合同一批比赛）",
         "blend_rates": "参数几何混合",
         "blend_log": "概率对数混合",
     }
-    header = ["轨道", "全场对数损失", "全场 Brier", "全场 RPS", "半场对数损失", "半全场对数损失", "前两比分", "n"]
+    header = ["轨道", "全场对数损失", "全场 Brier", "全场 RPS", "半场对数损失", "半全场对数损失", "前两比分", "半全场前两", "n"]
     rows = [header]
     for key, label in labels.items():
         block = (payload.get("tracks") or {}).get(key) or {}
         if not block.get("n"):
-            rows.append([label, "—", "—", "—", "—", "—", "—", "0"])
+            rows.append([label, "—", "—", "—", "—", "—", "—", "—", "0"])
             continue
         rows.append(
             [
@@ -152,13 +154,18 @@ def format_tracks(payload: dict) -> str:
                 "—" if block.get("ht_log_loss") is None else f"{block['ht_log_loss']:.4f}",
                 "—" if block.get("htft_log_loss") is None else f"{block['htft_log_loss']:.4f}",
                 "—" if block.get("top2_hit_rate") is None else f"{block['top2_hit_rate'] * 100:.1f}%",
+                "—" if block.get("top2_htft_hit_rate") is None else f"{block['top2_htft_hit_rate'] * 100:.1f}%",
                 str(block["n"]),
             ]
         )
     text = _table(rows)
     weight = payload.get("blend_rate_weight") or {}
     if weight:
-        text += f"\n参数混合的市场权重：起点 {weight.get('start')}，终点 {weight.get('end')}，中位数 {weight.get('median')}。"
+        text += (
+            f"\n参数混合的市场权重：起点 {weight.get('start')}，终点 {weight.get('end')}，中位数 {weight.get('median')}。"
+            f"计分 {weight.get('n_days')} 个评测日、{weight.get('n_matches')} 场"
+            f"（不同权重值 {weight.get('n_distinct_weights')} 个）。"
+        )
     for note in payload.get("notes") or []:
         text += f"\n{note}"
     direct = payload.get("direct_markets") or {}

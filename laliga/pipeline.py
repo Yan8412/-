@@ -188,6 +188,74 @@ def write_dashboard_latest(store: MatchStore, items: list[dict], *, label: str, 
     atomic_write_text(store.predictions_dir / "latest.csv", dashboard_csv(items))
 
 
+def describe_alternative_tracks(scored: list[ScoredFixture], history: pd.DataFrame, root: Path) -> str:
+    """Terminal lines for football, market, and blend. Nothing is written."""
+
+    from laliga.data.quotes import load_quotes
+    from laliga.model.joint import convolve
+    from laliga.model.tracks import geometric_rates, market_rates_for_row
+    from laliga.upgrade import load_registry
+
+    weight = _blend_weight(root, load_registry)
+    quotes = load_quotes(root)
+    lookup = _history_lookup(history)
+    lines = ["三条预测（终端显示；--no-archive 也会打印。不写入 latest_next.json）："]
+    if not scored:
+        lines.append("没有比赛。")
+        return "\n".join(lines)
+    for item in scored:
+        prediction = item.prediction
+        lines.append(f"{prediction.home_team} vs {prediction.away_team}")
+        lines.append("  纯足球：" + _prob_phrase(prediction.ft, prediction.top_htft))
+        row = lookup.get(int(prediction.fixture_id))
+        implied = None if row is None else market_rates_for_row(row, quotes)
+        if implied is None:
+            lines.append("  这场没有赛前 1X2，所以没有市场预测和混合。")
+            continue
+        forecast = implied.forecast(eta=0.0, max_half=6, max_ft=12)
+        lines.append("  市场：" + _forecast_phrase(forecast))
+        if prediction.rates is None:
+            lines.append("  混合：这场没有半场速率，不能和市场价格混合。")
+            continue
+        blended = convolve(geometric_rates(prediction.rates, implied.half_rates(), weight), max_half=6, max_ft=12)
+        if weight <= 0:
+            lines.append(f"  混合：市场权重为 0，与纯足球相同。{_forecast_phrase(blended)}")
+        else:
+            lines.append(f"  混合（市场权重 {weight:.2f}）：{_forecast_phrase(blended)}")
+    return "\n".join(lines)
+
+
+def _blend_weight(root: Path, load_registry) -> float:
+    registry = load_registry(root) or {}
+    try:
+        return float(((registry.get("champion") or {}).get("params") or {}).get("blend_market_weight") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _history_lookup(history: pd.DataFrame) -> dict:
+    lookup = {}
+    if history is None or history.empty or "fixture_id" not in history.columns:
+        return lookup
+    for _, row in history.drop_duplicates("fixture_id", keep="last").iterrows():
+        lookup[int(row["fixture_id"])] = row
+    return lookup
+
+
+def _prob_phrase(market, top_htft) -> str:
+    pairs = "、".join(f"{code} {probability * 100:.1f}%" for code, probability in (top_htft or [])[:2]) or "无"
+    return (
+        f"全场 {market.home * 100:.1f}% / {market.draw * 100:.1f}% / {market.away * 100:.1f}%"
+        f"；半全场前两档 {pairs}"
+    )
+
+
+def _forecast_phrase(forecast) -> str:
+    home, draw, away = forecast.ft_probs
+    pairs = "、".join(f"{code} {probability * 100:.1f}%" for code, probability in forecast.top_htft[:2]) or "无"
+    return f"全场 {home * 100:.1f}% / {draw * 100:.1f}% / {away * 100:.1f}%；半全场前两档 {pairs}"
+
+
 def annotate_market_items(items: list[dict], scored: list[ScoredFixture], history: pd.DataFrame, root: Path) -> None:
     """Add market and blend summaries onto dashboard items when a price exists.
 

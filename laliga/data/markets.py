@@ -6,8 +6,9 @@ This module is the one-off (and later incremental) pass:
 * xG: ``GET /fixtures/multi/{ids}?include=xGFixture``, up to 50 ids per
   request. Type 5304 only. xGA is the opponent's xG.
 * Odds: ``GET /fixtures/multi/{ids}?include=odds&filters=markets:1``.
-  Market 1 is Fulltime Result. ``inplayOdds`` is never requested. Quotes
-  at or after kickoff are dropped, then the remaining bookmakers are
+  Market 1 is Fulltime Result. ``inplayOdds`` is never requested. A quote
+  at or after kickoff is dropped unless ``stopped`` or ``winning`` marks a
+  settlement update of the pre-match row. The remaining bookmakers are
   averaged and de-vigged.
 
 A second run asks again for rows that are still missing odds, for finished
@@ -30,7 +31,7 @@ import pandas as pd
 
 from laliga.data.client import SportMonksClient, SportMonksError
 from laliga.data.parse import aggregate_prematch_1x2, team_expected_goals
-from laliga.data.quotes import EXTENDED_FILTER, MARKET_NAMES, absorb_fixture_odds
+from laliga.data.quotes import EXTENDED_FILTER, MARKET_NAMES, absorb_fixture_odds, load_quotes, save_quotes
 from laliga.data.store import MatchStore
 from laliga.model.features import ODDS_FEATURES, odds_features
 
@@ -132,14 +133,15 @@ def format_market_fetch(result: MarketFetchResult) -> str:
         f"完整赛前 1X2：{result.odds_complete} 场（本次计划请求 {result.odds_requested} 场）。",
         f"完场且主客 xG 都有：{result.xg_complete} 场（本次计划请求 {result.xg_requested} 场）。",
         "赔率来自赛前 include=odds、filters=markets:1（全场胜平负）。",
-        "每家博彩只用开赛前最后一条报价；多家取隐含概率平均后再去掉水位。不请求 inplayOdds。",
+        "每家博彩只用赛前最后一条报价；多家取隐含概率平均后再去掉水位。不请求 inplayOdds。",
+        "latest_bookmaker_update 早于开球的保留。不早于开球时，只有 stopped 为真或带 winning 字段才保留，这是赛前盘结算碰过时间，不是滚球。其余开球后的报价丢掉。",
         "raw_implied_* 是去水位之前的平均 1/小数赔率。Shin 和幂去水位要用它。"
         "只有去水位概率、没有 raw_implied_* 的完场比赛会再请求一次。",
         "同一批比赛还会再请求一次其他赛前盘："
         + "、".join(f"{market_id} {name}" for market_id, name in MARKET_NAMES.items() if market_id != 1)
         + f"。过滤条件 {EXTENDED_FILTER}。",
-        "这些盘写到 processed/odds_quotes.json。缺某个盘就留空，不影响 1X2 和 xG。",
-        "每家博彩的最早一条赛前报价是开盘，最晚一条是收盘。只有一个时间戳时不算开盘/收盘对照。",
+        "这些盘写到 processed/odds_quotes.json，每一轮请求结束时写一次，不按场重写。缺某个盘就留空，不影响 1X2 和 xG。",
+        "开盘只在同一选项真有两个时间戳时才有。一行一个选项、只有 latest_bookmaker_update 时，开盘不可用，收盘就是这一口。不同选项时间不同不算历史。",
         "xG 是 xGFixture 的 type 5304。home_xga 是客队 xG，away_xga 是主队 xG。",
         "本场 xG 只留给以后的比赛做滚动均值，不会当成这场的特征。",
         "每日 fetch 和操作台「更新数据」不会跑这一步。补新比赛后再执行本命令即可，已有数值的行会跳过。",
@@ -169,50 +171,57 @@ def _pull_chunks(
     lookup = _fixture_lookup(frame)
     total = len(fixture_ids)
     seen = 0
-    for chunk in _chunks(fixture_ids, chunk_size):
-        seen += len(chunk)
-        logger.info("回填%s %s/%s 场", "赔率" if kind == "odds" else "xG", seen, total)
-        params: dict[str, str] = {"include": include}
-        if filters:
-            params["filters"] = filters
-        path = "fixtures/multi/" + ",".join(str(fixture_id) for fixture_id in chunk)
-        returned: set[int] = set()
-        try:
-            for payload in client.paginate(path, params):
-                if not isinstance(payload, dict):
+    quote_store = load_quotes(quotes_root) if quotes_root is not None and kind == "odds" else None
+    try:
+        for chunk in _chunks(fixture_ids, chunk_size):
+            seen += len(chunk)
+            logger.info("回填%s %s/%s 场", "赔率" if kind == "odds" else "xG", seen, total)
+            params: dict[str, str] = {"include": include}
+            if filters:
+                params["filters"] = filters
+            path = "fixtures/multi/" + ",".join(str(fixture_id) for fixture_id in chunk)
+            returned: set[int] = set()
+            try:
+                for payload in client.paginate(path, params):
+                    if not isinstance(payload, dict):
+                        continue
+                    try:
+                        fixture_key = int(payload.get("id"))
+                    except (TypeError, ValueError):
+                        continue
+                    returned.add(fixture_key)
+                    if quote_store is not None:
+                        meta = lookup.get(fixture_key)
+                        if meta is not None:
+                            absorb_fixture_odds(
+                                quotes_root,
+                                payload,
+                                kickoff=meta[3],
+                                home_id=meta[1],
+                                away_id=meta[2],
+                                store=quote_store,
+                                flush=False,
+                            )
+                    if _apply_payload(frame, lookup, payload, kind):
+                        attempts[kind].discard(fixture_key)
+                    else:
+                        attempts[kind].add(fixture_key)
+            except SportMonksError as exc:
+                if _permission_denied(exc):
+                    logger.warning("%s", denial)
+                    return denial
+                if _missing_result(exc):
+                    logger.info("这批比赛没有%s：%s", "赔率" if kind == "odds" else "xG", exc)
+                    attempts[kind].update(fixture_id for fixture_id in chunk if fixture_id not in returned)
                     continue
-                try:
-                    fixture_key = int(payload.get("id"))
-                except (TypeError, ValueError):
-                    continue
-                returned.add(fixture_key)
-                if quotes_root is not None and kind == "odds":
-                    meta = lookup.get(fixture_key)
-                    if meta is not None:
-                        absorb_fixture_odds(
-                            quotes_root,
-                            payload,
-                            kickoff=meta[3],
-                            home_id=meta[1],
-                            away_id=meta[2],
-                        )
-                if _apply_payload(frame, lookup, payload, kind):
-                    attempts[kind].discard(fixture_key)
-                else:
-                    attempts[kind].add(fixture_key)
-        except SportMonksError as exc:
-            if _permission_denied(exc):
-                logger.warning("%s", denial)
-                return denial
-            if _missing_result(exc):
-                logger.info("这批比赛没有%s：%s", "赔率" if kind == "odds" else "xG", exc)
-                attempts[kind].update(fixture_id for fixture_id in chunk if fixture_id not in returned)
-                continue
-            raise
-        for fixture_id in chunk:
-            if fixture_id not in returned:
-                attempts[kind].add(fixture_id)
-    return None
+                raise
+            for fixture_id in chunk:
+                if fixture_id not in returned:
+                    attempts[kind].add(fixture_id)
+        return None
+    finally:
+        if quote_store is not None:
+            save_quotes(quotes_root, quote_store)
 
 
 def _pull_extended(
@@ -228,6 +237,16 @@ def _pull_extended(
     if not fixture_ids:
         return None, 0
     lookup = _fixture_lookup(frame)
+    quote_store = load_quotes(root)
+    try:
+        return _pull_extended_chunks(
+            client, root, fixture_ids, lookup=lookup, quote_store=quote_store, chunk_size=chunk_size
+        )
+    finally:
+        save_quotes(root, quote_store)
+
+
+def _pull_extended_chunks(client, root, fixture_ids, *, lookup, quote_store, chunk_size: int):
     saved = 0
     note = None
     for chunk in _chunks(fixture_ids, chunk_size):
@@ -254,7 +273,15 @@ def _pull_extended(
             meta = lookup.get(fixture_key)
             if meta is None:
                 continue
-            if absorb_fixture_odds(root, payload, kickoff=meta[3], home_id=meta[1], away_id=meta[2]):
+            if absorb_fixture_odds(
+                root,
+                payload,
+                kickoff=meta[3],
+                home_id=meta[1],
+                away_id=meta[2],
+                store=quote_store,
+                flush=False,
+            ):
                 saved += 1
     return note, saved
 

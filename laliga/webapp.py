@@ -537,6 +537,8 @@ def _tracks_view(payload: dict) -> dict:
         ("football", "纯足球"),
         ("football_on_market_rows", "纯足球（有赔率的场次）"),
         ("market", "市场"),
+        ("market_on_blend_rows", "市场（与混合同一批比赛）"),
+        ("football_on_blend_rows", "纯足球（与混合同一批比赛）"),
         ("blend_rates", "参数几何混合"),
         ("blend_log", "概率对数混合"),
     )
@@ -566,6 +568,7 @@ def _tracks_view(payload: dict) -> dict:
                 "ft_brier": num(block.get("ft_brier")),
                 "ft_rps": num(block.get("ft_rps")),
                 "top2": num(block.get("top2_hit_rate"), 1, True),
+                "top2_htft": num(block.get("top2_htft_hit_rate"), 1, True),
                 "ht_log_loss": num(block.get("ht_log_loss")),
                 "htft_log_loss": num(block.get("htft_log_loss")),
                 "n": block.get("n") or 0,

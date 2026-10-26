@@ -76,6 +76,8 @@ def test_demo_and_predict_next_run_offline(tmp_path):
     assert predict.returncode == 0, predict.stderr
     assert "全场胜" in predict.stdout
     assert "不是投注建议" in predict.stdout
+    assert "三条预测" in predict.stdout
+    assert "纯足球" in predict.stdout
     table = pd.read_csv(tmp_path / "next.csv")
     assert len(table) == 3
     assert (table[["ft_home", "ft_draw", "ft_away"]].sum(axis=1) - 1).abs().max() < 1e-5
@@ -378,6 +380,8 @@ def test_daily_predict_keeps_latest_next_format_publishes_and_archives(tmp_path)
 
     skipped = _predict_next(tmp_path, "--no-archive")
     assert skipped.returncode == 0, skipped.stderr
+    assert "三条预测" in skipped.stdout
+    assert "纯足球" in skipped.stdout
     assert len(archive.live_records()) == 6
 
     history = _run([sys.executable, "-m", "laliga", "history", "--data-dir", str(tmp_path), "--json", str(tmp_path / "h.json")], tmp_path)

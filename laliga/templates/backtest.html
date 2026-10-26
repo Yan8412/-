@@ -39,7 +39,7 @@
   <div class="wrap">
     <table>
       <thead>
-        <tr><th>轨道</th><th>全场对数损失</th><th>全场 Brier</th><th>全场 RPS</th><th>前两比分</th><th>半场对数损失</th><th>半全场对数损失</th><th>n</th></tr>
+        <tr><th>轨道</th><th>全场对数损失</th><th>全场 Brier</th><th>全场 RPS</th><th>前两比分</th><th>半全场前两</th><th>半场对数损失</th><th>半全场对数损失</th><th>n</th></tr>
       </thead>
       <tbody>
         {% for row in tracks.rows %}
@@ -49,6 +49,7 @@
           <td>{{ row.ft_brier }}</td>
           <td>{{ row.ft_rps }}</td>
           <td>{{ row.top2 }}</td>
+          <td>{{ row.top2_htft }}</td>
           <td>{{ row.ht_log_loss }}</td>
           <td>{{ row.htft_log_loss }}</td>
           <td>{{ row.n }}</td>

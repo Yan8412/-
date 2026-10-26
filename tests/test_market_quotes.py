@@ -163,9 +163,21 @@ class _ProbeClient:
             yield {
                 "id": 9001,
                 "starting_at": "2026-10-20T19:00:00Z",
+                "state_id": 5,
+                "state": {"id": 5, "short_name": "FT", "developer_name": "FT"},
                 "participants": [
                     {"id": 10, "name": "Home", "meta": {"location": "home"}},
                     {"id": 20, "name": "Away", "meta": {"location": "away"}},
+                ],
+            }
+            yield {
+                "id": 9002,
+                "starting_at": "2026-10-26T20:00:00Z",
+                "state_id": 1,
+                "state": {"id": 1, "short_name": "NS", "developer_name": "NS"},
+                "participants": [
+                    {"id": 11, "name": "Later", "meta": {"location": "home"}},
+                    {"id": 21, "name": "Side", "meta": {"location": "away"}},
                 ],
             }
             return
@@ -229,13 +241,15 @@ def test_probe_reports_markets_and_does_not_print_a_token(monkeypatch):
     monkeypatch.delenv("SPORTMONKS_API_TOKEN", raising=False)
     client = _ProbeClient()
     report = probe_recent(client, days=7, limit=3)
-    assert report["fixtures"]
+    assert [item["fixture_id"] for item in report["fixtures"]] == [9001]
     seen = report["fixtures"][0]["markets_seen"]
     assert 1 in seen and 80 in seen
     assert report["fixtures"][0]["xg"]["type_5304"] is True
     assert report["fixtures"][0]["xg"]["home"] == pytest.approx(1.4)
     text = format_probe(report)
     assert "super-secret-token" not in text
+    assert "UTC" in text
+    assert "Later" not in text
     assert "全场胜平负" in text
     assert "SPORTMONKS_API_TOKEN" not in text
     filters = [params.get("filters") for _path, params in client.calls if params.get("include") == "odds"]

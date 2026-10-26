@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
-from laliga.config import LA_LIGA_LEAGUE_ID
+from laliga.config import FINISHED_STATE_IDS, FINISHED_STATE_NAMES, LA_LIGA_LEAGUE_ID
 from laliga.data.client import SportMonksClient, SportMonksError
 from laliga.data.parse import team_expected_goals
 from laliga.data.quotes import MARKET_NAMES, ODDS_FILTER, _odd_rows, parse_odds_rows
@@ -35,14 +35,16 @@ def probe_recent(client: SportMonksClient, *, days: int = 21, limit: int = 6) ->
     except SportMonksError as exc:
         return {"ok": False, "error": str(exc), "fixtures": []}
     fixtures.sort(key=lambda item: str(item.get("starting_at") or ""))
-    chosen = fixtures[-limit:]
+    finished = [item for item in fixtures if _finished_fixture(item)]
+    chosen = finished[-limit:]
+    window = {"start": start.isoformat(), "end": end.isoformat(), "timezone": "UTC"}
     if not chosen:
-        return {
-            "ok": True,
-            "error": None,
-            "fixtures": [],
-            "note": f"{start.isoformat()} 至 {end.isoformat()} 没有返回西甲比赛。",
-        }
+        note = (
+            f"{start.isoformat()} 至 {end.isoformat()}（UTC）没有已完场的西甲比赛。未开赛的场次不在这次探测里。"
+            if fixtures
+            else f"{start.isoformat()} 至 {end.isoformat()}（UTC）没有返回西甲比赛。"
+        )
+        return {"ok": True, "error": None, "fixtures": [], "note": note, "window": window}
     ids = [int(item["id"]) for item in chosen]
     odds_payloads, odds_error = _multi(client, ids, {"include": "odds", "filters": ODDS_FILTER})
     xg_payloads, xg_error = _multi(client, ids, {"include": "xGFixture"})
@@ -76,7 +78,7 @@ def probe_recent(client: SportMonksClient, *, days: int = 21, limit: int = 6) ->
         "error": None,
         "odds_error": odds_error,
         "xg_error": xg_error,
-        "window": {"start": start.isoformat(), "end": end.isoformat()},
+        "window": window,
         "fixtures": reports,
         "catalog": {str(key): value for key, value in MARKET_NAMES.items()},
     }
@@ -88,8 +90,8 @@ def format_probe(report: dict) -> str:
     if report.get("note") and not report.get("fixtures"):
         return report["note"]
     lines = [
-        f"探测窗口 {report.get('window', {}).get('start')} 至 {report.get('window', {}).get('end')}，"
-        f"{len(report.get('fixtures') or [])} 场最近的西甲比赛。",
+        f"探测窗口 {report.get('window', {}).get('start')} 至 {report.get('window', {}).get('end')}（UTC），"
+        f"{len(report.get('fixtures') or [])} 场最近完场的西甲比赛。未开赛的场次不在这里。",
         "市场编号对照：" + "，".join(f"{key} {name}" for key, name in (report.get("catalog") or MARKET_NAMES).items()) + "。",
     ]
     if report.get("odds_error"):
@@ -113,10 +115,10 @@ def format_probe(report: dict) -> str:
         ) or "没有赛前盘"
         xg = fixture.get("xg") or {}
         lines.append(
-            f"{fixture.get('starting_at')} {fixture.get('home')} vs {fixture.get('away')}："
+            f"{fixture.get('starting_at')} UTC {fixture.get('home')} vs {fixture.get('away')}："
             f"盘口 {names}；博彩 {len(fixture.get('bookmakers') or [])} 家；"
             f"报价 {fixture.get('quote_rows')} 条；"
-            f"{'有开盘和收盘两个时间' if fixture.get('opening_and_closing') else '没有多时间戳，不能分出开盘和收盘'}；"
+            f"{'同一选项有两个以上时间戳，可以分出开盘和收盘' if fixture.get('opening_and_closing') else '同一选项没有多个时间戳，开盘不可用，只有最新价'}；"
             f"xG 主 {xg.get('home')} 客 {xg.get('away')}（字段 {xg.get('fields') or '无'}）。"
         )
     lines.append(
@@ -170,6 +172,24 @@ def _ids(fixture: dict) -> tuple[int | None, int | None]:
         elif location == "away":
             away = team_id
     return home, away
+
+
+def _finished_fixture(fixture: dict) -> bool:
+    state = fixture.get("state") if isinstance(fixture.get("state"), dict) else {}
+    texts = [
+        state.get("short_name"),
+        state.get("developer_name"),
+        state.get("state"),
+        fixture.get("state_name"),
+    ]
+    for text in texts:
+        if str(text or "").upper() in FINISHED_STATE_NAMES:
+            return True
+    raw_id = state.get("id", fixture.get("state_id"))
+    try:
+        return int(raw_id) in FINISHED_STATE_IDS
+    except (TypeError, ValueError):
+        return False
 
 
 def _xg_summary(payload: dict, home_id: int | None, away_id: int | None) -> dict:

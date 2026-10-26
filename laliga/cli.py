@@ -26,6 +26,7 @@ from laliga.model.service import ScorelineModel, fit_models
 from laliga.pipeline import (
     annotate_market_items,
     archive_alternative_tracks,
+    describe_alternative_tracks,
     archive_scored,
     dashboard_items,
     score_fixtures,
@@ -170,7 +171,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_model_args(tracks)
     tracks.add_argument("--min-train", type=int, default=DEFAULT_MIN_TRAIN_MATCHES)
     tracks.add_argument("--output", type=str, default="", help="默认 predictions/tracks_comparison.json")
-    tracks.add_argument("--refit-every", type=int, default=1, help="每隔多少个 UTC 日重拟合足球模型")
+    tracks.add_argument(
+        "--refit-every",
+        type=int,
+        default=0,
+        help="每隔多少个 UTC 日重拟合足球模型。0 表示 SportMonks 每天、football-data 每 7 天",
+    )
     tracks.add_argument("--history", choices=("sportmonks", "football-data"), default="sportmonks")
     tracks.add_argument("--since", type=int, default=None)
     tracks.add_argument("--ignore-champion", action="store_true")
@@ -392,12 +398,22 @@ def cmd_compare_tracks(args: argparse.Namespace) -> int:
         history = load_history(store.root, since=args.since)
     else:
         history = _filter_since(_require_history(store), args.since)
+    refit_every = args.refit_every
+    if refit_every == 0:
+        refit_every = 7 if args.history == "football-data" else 1
+    if refit_every < 1:
+        raise CliError("--refit-every 至少是 1。0 表示按数据源使用默认间隔。")
     config = _config(args, min_train=args.min_train)
+
+    def progress(text: str) -> None:
+        print(text, file=sys.stderr, flush=True)
+
     report = compare_tracks(
         history,
         config,
         quotes=quotes_for_root(store.root),
-        refit_every_days=max(args.refit_every, 1),
+        refit_every_days=refit_every,
+        notify=progress,
     )
     output = Path(args.output) if args.output else store.predictions_dir / "tracks_comparison.json"
     _write_utf8(output, json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
@@ -532,6 +548,7 @@ def cmd_predict(args: argparse.Namespace) -> int:
         if others:
             print(f"市场/混合存档：另写入 {others} 行（不计入纯足球命中率）。")
     print(format_predictions(predictions))
+    print(describe_alternative_tracks(scored, history, store.root))
     if args.csv:
         print(f"\nCSV 已写入 {args.csv}")
     if args.json:

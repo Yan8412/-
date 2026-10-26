@@ -10,6 +10,7 @@ day's results are not used to pick that day's weight.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 
@@ -32,6 +33,7 @@ from laliga.model.metrics import (
 from laliga.model.service import ScorelineModel, fit_models
 
 MIN_BLEND_HISTORY = 40
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -49,16 +51,17 @@ def compare_tracks(
     quotes: dict | None = None,
     min_blend_history: int = MIN_BLEND_HISTORY,
     refit_every_days: int = 1,
+    notify=None,
 ) -> TrackReport:
     finished = matches[matches["status"] == "finished"].dropna(subset=["home_goals_ft", "away_goals_ft"])
     if finished.empty:
         raise FitError("没有完场比赛，无法比较三条预测。")
-    rows = _walk(finished, config, quotes or {}, refit_every_days=refit_every_days)
+    rows = _walk(finished, config, quotes or {}, refit_every_days=refit_every_days, notify=notify)
     if not rows:
         raise FitError(
             f"三条预测没有评测任何比赛。完场 {len(finished)} 场，最少训练样本 {config.min_train_matches}。"
         )
-    _attach_blends(rows, min_history=min_blend_history)
+    _attach_blends(rows, min_history=min_blend_history, notify=notify)
     return TrackReport(_summarize(rows, config, min_blend_history))
 
 
@@ -97,13 +100,17 @@ def geometric_rates(football: HalfRates, market: HalfRates, market_weight: float
     )
 
 
-def _walk(finished: pd.DataFrame, config: ModelConfig, quotes: dict, *, refit_every_days: int) -> list[dict]:
+def _walk(finished: pd.DataFrame, config: ModelConfig, quotes: dict, *, refit_every_days: int, notify=None) -> list[dict]:
     rows: list[dict] = []
     previous: ScorelineModel | None = None
     last_fit: pd.Timestamp | None = None
     model: ScorelineModel | None = None
     for day, train, test in iter_evaluation_folds(finished, config.min_train_matches):
         as_of = pd.Timestamp(day)
+        _say(
+            f"评测日 {as_of.date().isoformat()}，训练 {len(train)} 场，评测 {len(test)} 场",
+            notify,
+        )
         due = last_fit is None or (as_of - last_fit).days >= max(refit_every_days, 1)
         if due or model is None:
             try:
@@ -141,6 +148,7 @@ def _one(match, model: ScorelineModel, quotes: dict, as_of: pd.Timestamp) -> dic
     market_ht = None
     market_top2 = None
     market_htft = None
+    market_top2_htft = None
     market_rates = None
     if implied is not None:
         forecast = implied.forecast(eta=0.0, max_half=6, max_ft=max(model.ft.max_goals, 12))
@@ -148,6 +156,7 @@ def _one(match, model: ScorelineModel, quotes: dict, as_of: pd.Timestamp) -> dic
         market_ht = forecast.ht_probs
         market_top2 = [(home, away) for home, away, _ in forecast.top2_scores]
         market_htft = forecast.htft
+        market_top2_htft = [code for code, _probability in forecast.top_htft[:2]]
         market_rates = implied.half_rates(0.0)
     bundle = quotes.get(str(int(match["fixture_id"]))) if quotes else None
     direct = direct_probabilities(bundle)
@@ -164,17 +173,19 @@ def _one(match, model: ScorelineModel, quotes: dict, as_of: pd.Timestamp) -> dic
         "football_top2": [(item.home_goals, item.away_goals) for item in prediction.top2_scores],
         "football_top3": [(item.home_goals, item.away_goals) for item in prediction.top_scores],
         "football_htft": dict(prediction.htft) if prediction.htft else None,
+        "football_top2_htft": [code for code, _probability in (prediction.top_htft or [])[:2]],
         "football_rates": None if football_rates is None else football_rates,
         "market_ft": market_probs,
         "market_ht": market_ht,
         "market_top2": market_top2,
         "market_htft": market_htft,
+        "market_top2_htft": market_top2_htft if implied is not None else None,
         "market_rates": market_rates,
         "direct": direct,
     }
 
 
-def _attach_blends(rows: list[dict], *, min_history: int) -> None:
+def _attach_blends(rows: list[dict], *, min_history: int, notify=None) -> None:
     usable = [row for row in rows if row["market_ft"] is not None and row["football_rates"] is not None and row["market_rates"] is not None]
     usable.sort(key=lambda row: (row["match_day"], row["fixture_id"]))
     days: list[tuple[str, list[dict]]] = []
@@ -182,12 +193,22 @@ def _attach_blends(rows: list[dict], *, min_history: int) -> None:
         if not days or days[-1][0] != row["match_day"]:
             days.append((row["match_day"], []))
         days[-1][1].append(row)
-    history: list[dict] = []
     grid = [index / 20 for index in range(21)]
+    _say(f"开始计算混合权重，可用比赛 {len(usable)} 场。", notify)
+    for index, row in enumerate(usable):
+        if index % 50 == 0:
+            _say(f"混合权重预计算 {index}/{len(usable)} 场", notify)
+        cached = []
+        for weight in grid:
+            blended = geometric_rates(row["football_rates"], row["market_rates"], weight)
+            cached.append(convolve(blended, max_half=5, max_ft=8).ft_probs)
+        row["_ft_by_weight"] = cached
+    history: list[dict] = []
     for _day, day_rows in days:
         if len(history) >= min_history:
             weight = _best_rate_weight(history, grid)
             log_weight = _best_log_weight(history, grid)
+            _say(f"混合评测日 {_day}，历史 {len(history)} 场，市场权重 {weight:.2f}", notify)
             for row in day_rows:
                 blended = geometric_rates(row["football_rates"], row["market_rates"], weight)
                 forecast = convolve(blended, max_half=6, max_ft=12)
@@ -195,25 +216,32 @@ def _attach_blends(rows: list[dict], *, min_history: int) -> None:
                 row["blend_rate_ht"] = forecast.ht_probs
                 row["blend_rate_htft"] = forecast.htft
                 row["blend_rate_top2"] = [(home, away) for home, away, _ in forecast.top2_scores]
+                row["blend_rate_top2_htft"] = [code for code, _probability in forecast.top_htft[:2]]
                 row["blend_rate_weight"] = weight
                 row["blend_log_ft"] = tuple(
                     log_pool(np.array([row["football_ft"]]), np.array([row["market_ft"]]), log_weight)[0]
                 )
                 row["blend_log_weight"] = log_weight
         history.extend(day_rows)
+    for row in usable:
+        row.pop("_ft_by_weight", None)
 
 
 def _best_rate_weight(history: list[dict], grid: list[float]) -> float:
     y = np.array([row["y_ft"] for row in history], dtype=int)
     best_weight = 0.0
     best_loss = np.inf
-    for weight in grid:
-        probs = []
-        for row in history:
-            blended = geometric_rates(row["football_rates"], row["market_rates"], weight)
-            forecast = convolve(blended, max_half=5, max_ft=8)
-            probs.append(forecast.ft_probs)
-        loss = multiclass_log_loss(y, np.array(probs, dtype=float))
+    cached = all(isinstance(row.get("_ft_by_weight"), list) and len(row["_ft_by_weight"]) == len(grid) for row in history)
+    for index, weight in enumerate(grid):
+        if cached:
+            probs = np.array([row["_ft_by_weight"][index] for row in history], dtype=float)
+        else:
+            probs = []
+            for row in history:
+                blended = geometric_rates(row["football_rates"], row["market_rates"], weight)
+                probs.append(convolve(blended, max_half=5, max_ft=8).ft_probs)
+            probs = np.array(probs, dtype=float)
+        loss = multiclass_log_loss(y, probs)
         if loss < best_loss - 1e-10:
             best_loss = loss
             best_weight = weight
@@ -237,15 +265,22 @@ def _best_log_weight(history: list[dict], grid: list[float]) -> float:
 
 
 def _summarize(rows: list[dict], config: ModelConfig, min_blend_history: int) -> dict:
-    football = _block(rows, "football_ft", "football_ht", "football_top2", "football_top3", "football_htft")
+    football = _block(rows, "football_ft", "football_ht", "football_top2", "football_top3", "football_htft", "football_top2_htft")
     paired = [row for row in rows if row.get("market_ft") is not None]
-    market = _block(paired, "market_ft", "market_ht", "market_top2", None, "market_htft")
-    football_on_market = _block(paired, "football_ft", "football_ht", "football_top2", "football_top3", "football_htft")
+    market = _block(paired, "market_ft", "market_ht", "market_top2", None, "market_htft", "market_top2_htft")
+    football_on_market = _block(
+        paired, "football_ft", "football_ht", "football_top2", "football_top3", "football_htft", "football_top2_htft"
+    )
     blended = [row for row in rows if row.get("blend_rate_ft") is not None]
-    blend_rate = _block(blended, "blend_rate_ft", "blend_rate_ht", "blend_rate_top2", None, "blend_rate_htft")
+    blend_rate = _block(
+        blended, "blend_rate_ft", "blend_rate_ht", "blend_rate_top2", None, "blend_rate_htft", "blend_rate_top2_htft"
+    )
     blend_log = _block(blended, "blend_log_ft", None, None, None, None)
+    market_on_blend = _block(blended, "market_ft", "market_ht", "market_top2", None, "market_htft", "market_top2_htft")
+    football_on_blend = _block(
+        blended, "football_ft", "football_ht", "football_top2", "football_top3", "football_htft", "football_top2_htft"
+    )
     direct = _direct_block(rows)
-    weights = [row["blend_rate_weight"] for row in blended]
     return {
         "schema_version": 1,
         "kind": "tracks",
@@ -259,16 +294,18 @@ def _summarize(rows: list[dict], config: ModelConfig, min_blend_history: int) ->
             "football": football,
             "football_on_market_rows": football_on_market,
             "market": market,
+            "market_on_blend_rows": market_on_blend,
+            "football_on_blend_rows": football_on_blend,
             "blend_rates": blend_rate,
             "blend_log": blend_log,
         },
         "direct_markets": direct,
-        "blend_rate_weight": _weight_summary(weights),
+        "blend_rate_weight": _weight_summary(blended),
         "notes": _notes(rows, paired, blended, min_blend_history),
     }
 
 
-def _block(rows, ft_key, ht_key, top2_key, top3_key, htft_key) -> dict:
+def _block(rows, ft_key, ht_key, top2_key, top3_key, htft_key, top2_htft_key=None) -> dict:
     if not rows or any(row.get(ft_key) is None for row in rows):
         return {"n": 0}
     y = np.array([row["y_ft"] for row in rows], dtype=int)
@@ -281,6 +318,7 @@ def _block(rows, ft_key, ht_key, top2_key, top3_key, htft_key) -> dict:
         "ft_accuracy": float(np.mean(np.argmax(probs, axis=1) == y)),
         "top2_hit_rate": _hit(rows, top2_key, "score") if top2_key else None,
         "top3_hit_rate": _hit(rows, top3_key, "score") if top3_key else None,
+        "top2_htft_hit_rate": _hit(rows, top2_htft_key, "htft_code") if top2_htft_key else None,
     }
     ht_rows = [row for row in rows if row["y_ht"] is not None and ht_key and row.get(ht_key) is not None]
     if ht_rows:
@@ -341,9 +379,10 @@ def _hit(rows, key, actual_key) -> float | None:
     hits = []
     for row in rows:
         predicted = row.get(key)
-        if not predicted:
+        actual = row.get(actual_key)
+        if not predicted or actual is None:
             continue
-        hits.append(row[actual_key] in predicted)
+        hits.append(actual in predicted)
     if not hits:
         return None
     return float(np.mean(hits))
@@ -353,12 +392,22 @@ def _score_text(score: tuple[int, int]) -> str:
     return f"{score[0]}-{score[1]}"
 
 
-def _weight_summary(weights: list[float]) -> dict | None:
-    if not weights:
+def _weight_summary(rows: list[dict]) -> dict | None:
+    """``n_days`` is distinct match days, not the number of distinct weights."""
+
+    if not rows:
         return None
+    weights = [float(row["blend_rate_weight"]) for row in rows]
     ordered = sorted(weights)
     mid = ordered[len(ordered) // 2]
-    return {"start": weights[0], "end": weights[-1], "median": mid, "n_days": len(set(weights))}
+    return {
+        "start": weights[0],
+        "end": weights[-1],
+        "median": mid,
+        "n_days": len({str(row.get("match_day")) for row in rows}),
+        "n_matches": len(rows),
+        "n_distinct_weights": len(set(weights)),
+    }
 
 
 def _notes(rows, paired, blended, min_blend_history: int) -> list[str]:
@@ -372,7 +421,20 @@ def _notes(rows, paired, blended, min_blend_history: int) -> list[str]:
         notes.append("这些比赛没有赛前 1X2，所以没有市场预测，也没有混合。")
     elif len(blended) == 0:
         notes.append(f"同时有足球概率和市场概率的历史不足 {min_blend_history} 场，混合还没有开始计分。")
+    elif len(blended) != len(paired):
+        notes.append(
+            f"市场轨道 {len(paired)} 场，混合轨道 {len(blended)} 场。"
+            "「市场（与混合同一批比赛）」和「纯足球（与混合同一批比赛）」用已经计分的混合场次，方便直接比较。"
+        )
+    notes.append("混合权重摘要里的 n_days 是混合已经计分的不同评测日，不是不同权重值的个数。")
     return notes
+
+
+def _say(text: str, notify) -> None:
+    if notify is not None:
+        notify(text)
+    else:
+        logger.info("%s", text)
 
 
 def quotes_for_root(root) -> dict:
