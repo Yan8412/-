@@ -124,6 +124,43 @@ def test_implied_goals_recover_known_rates_from_1x2_and_totals():
     assert len(forecast.top2_scores) == 2
 
 
+def test_fitted_rho_and_draw_adjustment_match_the_closing_draw():
+    from laliga.model.dixon_coles import outcome_probabilities, score_matrix
+    from laliga.model.implied_goals import _ah_home_prob
+    from laliga.model.tracks import TRACK_MAX_FT, TRACK_MAX_HALF, TRACK_TEMPERATURE, market_rates_for_row
+
+    lam_home, lam_away, rho = 1.45, 1.10, -0.12
+    matrix = score_matrix(lam_home, lam_away, rho, 8)
+    home, draw, away = outcome_probabilities(matrix)
+    over = _over_prob(matrix, 2.5)
+    cover = _ah_home_prob(matrix, -0.5)
+    # Decimal prices with a small overround, the shape compare-tracks reads off a row.
+    row = {
+        "fixture_id": 19439470,
+        "odds_home": (1 / home) * 1.03,
+        "odds_draw": (1 / draw) * 1.03,
+        "odds_away": (1 / away) * 1.03,
+    }
+    rates = market_rates_for_row(row, {})
+    assert rates is not None
+    assert rates.rho < -0.08
+    forecast = rates.forecast(max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE)
+    assert forecast.ft_probs[1] == pytest.approx(draw, abs=0.004)
+    assert forecast.ft_probs[0] == pytest.approx(home, abs=0.02)
+    # Totals and the handicap still have to be solvable alongside that draw.
+    priced = infer_rates(
+        MarketTargets(
+            ft_probs=(home, draw, away),
+            ou=[(2.5, over)],
+            ah=[(-0.5, cover)],
+        )
+    )
+    assert priced is not None
+    priced_forecast = priced.forecast(max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE)
+    assert priced_forecast.ft_probs[1] == pytest.approx(draw, abs=0.004)
+    assert abs(priced_forecast.ft_probs[0] - home) < 0.02
+
+
 def test_row_without_totals_still_prices_1x2_and_optional_columns_stay_missing():
     bare = parse_seasons([_BARE], [2024]).iloc[0]
     assert pd.isna(bare["ou25_pre_over"])

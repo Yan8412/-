@@ -66,7 +66,16 @@ def compare_tracks(
             f"三条预测没有评测任何比赛。完场 {len(finished)} 场，最少训练样本 {config.min_train_matches}。"
         )
     _attach_blends(rows, min_history=min_blend_history, notify=notify)
-    return TrackReport(_summarize(rows, config, min_blend_history))
+    payload = _summarize(rows, config, min_blend_history)
+    summary = payload.get("blend_rate_weight") or {}
+    if summary:
+        _say(
+            "参数混合的市场权重："
+            f"起点 {float(summary['start']):.2f}，终点 {float(summary['end']):.2f}，中位数 {float(summary['median']):.2f}。"
+            f"计分 {summary.get('n_days')} 个评测日、{summary.get('n_matches')} 场。",
+            notify,
+        )
+    return TrackReport(payload)
 
 
 def market_rates_for_row(row, quotes: dict | None, *, devig_method: str = "proportional") -> ImpliedRates | None:
@@ -78,8 +87,8 @@ def market_rates_for_row(row, quotes: dict | None, *, devig_method: str = "propo
         targets = targets_from_row(row)
     if targets is None:
         return None
-    rho = -0.05
-    targets.rho = rho
+    # ``rho`` on the targets is the prior centre. The solver fits it, and the
+    # forecast then matches the closing draw on the convolved 1X2.
     return infer_rates(targets)
 
 

@@ -98,6 +98,8 @@ def test_blend_log_loss_promotes_when_football_stays_inside_tolerance():
     promoted, reason = _decide(_scored(0.90, 0.9218), champion, rule="bootstrap", min_promote=40)
     assert promoted is False
     assert "冠军不变" in reason
+    assert "0.0010" in reason
+    assert "0.005" in reason
     promoted, reason = _decide(
         _scored(0.905, 0.9087, htft=1.2),
         _scored(0.90, 0.9228, htft=1.0),

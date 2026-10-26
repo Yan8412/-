@@ -474,13 +474,13 @@ def _decide(challenger: dict, champion: dict | None, *, rule: str, min_promote: 
     if rule == "strict":
         if loss_delta < -1e-4 and rps_delta <= 0.005:
             return True, "样本外全场对数损失更低，RPS 没有明显变差，升为冠军。"
-        return False, "样本外没有同时改善对数损失并守住 RPS，冠军不变。"
+        return False, _rejection("strict", loss_delta, rps_delta, gain=1e-4, rps_limit=0.005)
     # Bootstrap the paired gap when both models were scored on the same matches.
     # The stored metrics are aggregates, so the strict gap is the decision when
     # per-match vectors were not kept. Require a clear log-loss gain.
     if loss_delta < -0.005 and rps_delta <= 0.002:
         return True, "样本外全场对数损失至少低 0.005，且 RPS 没有上升超过 0.002，升为冠军。"
-    return False, "样本外改进不够大（对数损失需要至少低 0.005，且 RPS 不能变差超过 0.002），冠军不变。"
+    return False, _rejection("bootstrap", loss_delta, rps_delta, gain=0.005, rps_limit=0.002)
 
 
 def _blend_target(challenger: dict, champion: dict) -> float | None:
@@ -516,7 +516,34 @@ def _decide_blend(
     htft_ok = htft_delta is None or htft_delta <= football_limit
     if blend_delta < -gain and football_delta <= football_limit and rps_delta <= rps_limit and htft_ok:
         return True, "样本外混合全场对数损失更低，其余指标没有超出容差，升为冠军。"
-    return False, "样本外混合对数损失改进不够，或足球、RPS、半全场超出容差，冠军不变。"
+    failed = []
+    improved = -blend_delta
+    if improved <= gain:
+        if blend_delta > 0:
+            failed.append(f"混合全场对数损失变差 {blend_delta:.4f}，需要至少降低 {gain:g}")
+        else:
+            failed.append(f"混合全场对数损失只降低 {max(improved, 0.0):.4f}，小于 {gain:g}")
+    if football_delta > football_limit:
+        failed.append(f"纯足球对数损失变差 {football_delta:.4f}，超过 {football_limit:g}")
+    if rps_delta > rps_limit:
+        failed.append(f"RPS 变差 {rps_delta:.4f}，超过 {rps_limit:g}")
+    if htft_delta is not None and htft_delta > football_limit:
+        failed.append(f"半全场对数损失变差 {htft_delta:.4f}，超过 {football_limit:g}")
+    return False, "样本外未升冠军：" + "；".join(failed) + "。冠军不变。"
+
+
+def _rejection(rule: str, loss_delta: float, rps_delta: float, *, gain: float, rps_limit: float) -> str:
+    failed = []
+    if loss_delta >= -gain:
+        if loss_delta > 0:
+            failed.append(f"全场对数损失变差 {loss_delta:.4f}，需要至少降低 {gain:g}")
+        else:
+            failed.append(f"全场对数损失只降低 {-loss_delta:.4f}，小于 {gain:g}")
+    if rps_delta > rps_limit:
+        failed.append(f"RPS 变差 {rps_delta:.4f}，超过 {rps_limit:g}")
+    if not failed:
+        failed.append(f"没有同时满足对数损失和 RPS（规则 {rule}）")
+    return "样本外未升冠军：" + "；".join(failed) + "。冠军不变。"
 
 
 def _track_loss(block, key: str, *, expected_n: int) -> float | None:

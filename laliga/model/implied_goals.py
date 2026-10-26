@@ -26,6 +26,7 @@ from laliga.model.joint import HalfRates, JointForecast, convolve
 _DEFAULT_TOTAL = 2.55
 _DEFAULT_SHARE = 0.45
 _RHO = -0.05
+_RHO_LIMIT = 0.2
 
 
 @dataclass
@@ -48,6 +49,7 @@ class ImpliedRates:
     rho: float
     loss: float
     used: list[str]
+    draw_target: float | None = None
 
     def half_rates(self, eta: float = 0.0) -> HalfRates:
         share = float(np.clip(self.ht_share, 0.3, 0.7))
@@ -62,7 +64,10 @@ class ImpliedRates:
         )
 
     def forecast(self, eta: float = 0.0, **kwargs) -> JointForecast:
-        return convolve(self.half_rates(eta), **kwargs)
+        forecast = convolve(self.half_rates(eta), **kwargs)
+        if self.draw_target is None:
+            return forecast
+        return _match_closing_draw(forecast, self.draw_target)
 
 
 def infer_rates(targets: MarketTargets, *, max_goals: int = 8) -> ImpliedRates | None:
@@ -75,38 +80,52 @@ def infer_rates(targets: MarketTargets, *, max_goals: int = 8) -> ImpliedRates |
         return None
     probs = probs / probs.sum()
     share_free = bool(targets.ht_ou or targets.ht_ah)
-    # theta: log λh, log λa, logit share
-    start = np.array([math.log(1.4), math.log(1.1), _logit((targets.share_prior - 0.3) / 0.4)], dtype=float)
+    # theta: log λh, log λa, logit share, arctanh rho. Rho is free so the
+    # low-score correction can hit the closing draw; the forecast then
+    # rescales draw scorelines because two convolved halves are not one matrix.
+    rho_centre = float(np.clip(targets.rho, -_RHO_LIMIT + 1e-3, _RHO_LIMIT - 1e-3))
+    start = np.array(
+        [
+            math.log(1.4),
+            math.log(1.1),
+            _logit((targets.share_prior - 0.3) / 0.4),
+            math.atanh(rho_centre / _RHO_LIMIT),
+        ],
+        dtype=float,
+    )
 
     def objective(theta: np.ndarray) -> float:
         lam_h = float(math.exp(theta[0]))
         lam_a = float(math.exp(theta[1]))
         share = 0.3 + 0.4 / (1.0 + math.exp(-theta[2])) if share_free else float(targets.share_prior)
-        matrix = score_matrix(lam_h, lam_a, targets.rho, max_goals)
-        loss = _sq(probs, np.array(_outcome_probs(matrix)))
+        rho = _RHO_LIMIT * math.tanh(float(theta[3]))
+        matrix = score_matrix(lam_h, lam_a, rho, max_goals)
+        predicted = np.array(_outcome_probs(matrix))
+        loss = 8.0 * _sq(probs, predicted)
+        loss += 6.0 * (predicted[1] - probs[1]) ** 2
+        loss += 0.05 * (rho - targets.rho) ** 2
         for line, over in targets.ou:
             loss += _sq_scalar(over, _over_prob(matrix, line))
         for handicap, cover in targets.ah:
             loss += _sq_scalar(cover, _ah_home_prob(matrix, handicap))
         if share_free:
-            ht_matrix = score_matrix(lam_h * share, lam_a * share, targets.rho, max_goals)
+            ht_matrix = score_matrix(lam_h * share, lam_a * share, rho, max_goals)
             for line, over in targets.ht_ou:
                 loss += _sq_scalar(over, _over_prob(ht_matrix, line))
             for handicap, cover in targets.ht_ah:
                 loss += _sq_scalar(cover, _ah_home_prob(ht_matrix, handicap))
         if not targets.ou and not targets.ah:
             loss += 0.35 * (lam_h + lam_a - targets.total_prior) ** 2
-        if not share_free:
-            loss += 0.0
-        else:
+        if share_free:
             loss += 0.02 * (share - targets.share_prior) ** 2
         return float(loss)
 
-    result = minimize(objective, start, method="Nelder-Mead", options={"maxiter": 80, "xatol": 1e-3, "fatol": 1e-5})
+    result = minimize(objective, start, method="Nelder-Mead", options={"maxiter": 160, "xatol": 1e-3, "fatol": 1e-6})
     theta = result.x if np.isfinite(result.fun) else start
     lam_h = float(math.exp(theta[0]))
     lam_a = float(math.exp(theta[1]))
     share = 0.3 + 0.4 / (1.0 + math.exp(-theta[2])) if share_free else float(targets.share_prior)
+    fitted_rho = _RHO_LIMIT * math.tanh(float(theta[3]))
     used = ["1x2"]
     if targets.ou:
         used.append("ou")
@@ -118,7 +137,70 @@ def infer_rates(targets: MarketTargets, *, max_goals: int = 8) -> ImpliedRates |
         used.append("ht_ah")
     if not targets.ou and not targets.ah:
         used.append("total_prior")
-    return ImpliedRates(lam_h, lam_a, float(share), float(targets.rho), float(objective(theta)), used)
+    return ImpliedRates(
+        lam_h,
+        lam_a,
+        float(share),
+        float(fitted_rho),
+        float(objective(theta)),
+        used,
+        draw_target=float(probs[1]),
+    )
+
+
+def _match_closing_draw(forecast: JointForecast, target_draw: float) -> JointForecast:
+    """Rescale full-time draw scorelines so the convolved 1X2 matches the closing draw.
+
+    Two half matrices convolved together are not the full-time Dixon–Coles
+    matrix the solver matched, and the draw is the margin that moves. Home
+    and away keep their relative weight in whatever mass is left.
+    """
+
+    matrix = np.array(forecast.ft_matrix, dtype=float, copy=True)
+    draw = float(np.trace(matrix))
+    target = float(target_draw)
+    if draw <= 1e-8 or not math.isfinite(target) or not 0.0 < target < 1.0 or abs(draw - target) < 1e-4:
+        return forecast
+    alpha = target * (1.0 - draw) / (draw * (1.0 - target))
+    if not math.isfinite(alpha) or alpha <= 0:
+        return forecast
+    alpha = float(np.clip(alpha, 0.05, 20.0))
+    index = np.arange(matrix.shape[0])
+    matrix[index, index] *= alpha
+    total = float(matrix.sum())
+    if total <= 0:
+        return forecast
+    matrix /= total
+    htft = dict(forecast.htft)
+    for code, value in list(htft.items()):
+        if str(code).endswith("/X"):
+            htft[code] = float(value) * alpha
+    scale = sum(htft.values())
+    if scale > 0:
+        htft = {code: value / scale for code, value in htft.items()}
+    from laliga.model.dixon_coles import outcome_probabilities, top_scorelines
+
+    top = top_scorelines(matrix, max(len(forecast.top_scores), 2))
+    ordered = sorted(htft.items(), key=lambda item: (-item[1], item[0]))
+    goals_home = np.arange(matrix.shape[0], dtype=float)
+    goals_away = np.arange(matrix.shape[1], dtype=float)
+    expected_ft = (
+        float((matrix.sum(axis=1) * goals_home).sum()),
+        float((matrix.sum(axis=0) * goals_away).sum()),
+    )
+    return JointForecast(
+        ft_matrix=matrix,
+        ht_matrix=forecast.ht_matrix,
+        ft_probs=outcome_probabilities(matrix),
+        ht_probs=forecast.ht_probs,
+        top_scores=top,
+        top2_scores=top[:2],
+        htft=htft,
+        top_htft=ordered[:2],
+        expected_ft=expected_ft,
+        expected_ht=forecast.expected_ht,
+        rates=forecast.rates,
+    )
 
 
 def _outcome_probs(matrix: np.ndarray) -> tuple[float, float, float]:

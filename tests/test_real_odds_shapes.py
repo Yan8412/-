@@ -234,6 +234,12 @@ def test_weight_summary_counts_match_days_not_distinct_weights():
     assert summary["n_days"] == 3
     assert summary["n_matches"] == 4
     assert summary["n_distinct_weights"] == 2
+    from laliga.report import format_tracks
+
+    text = format_tracks({"tracks": {}, "blend_rate_weight": summary, "notes": []})
+    assert "参数混合的市场权重" in text
+    assert "起点 0.20" in text
+    assert "终点 0.40" in text
 
 
 def test_predict_text_shows_market_and_blend_at_the_champion_weight(tmp_path, monkeypatch):
@@ -622,3 +628,97 @@ def test_stale_parser_version_is_reparsed_without_refresh(tmp_path, caplog):
     assert "回填扩展盘" in caplog.text
     second = fetch_stored_markets(client, store)
     assert second.odds_requested == 0
+
+
+def test_empate_is_draw_and_same_prices_are_not_an_opening():
+    stamp = "2026-01-26T12:00:00Z"
+    kickoff = "2026-01-26T20:00:00Z"
+    barcelona = parse_odds_rows(
+        [
+            _row(29, "Empate - Barcelona", "6.50", stamp, name=None, original_label=None, bookmaker_id=2),
+            _row(29, "Barcelona - Empate", "7.00", stamp, name=None, original_label=None, bookmaker_id=2),
+        ],
+        kickoff=kickoff,
+        home_id=1,
+        away_id=2,
+        home_name="Barcelona",
+        away_name="Levante",
+    )
+    assert set(barcelona["htft"]["closing"]["probs"]) == {"X/1", "1/X"}
+    osasuna = parse_odds_rows(
+        [
+            _row(29, "Osasuna - Empate", "5.50", stamp, name=None, original_label=None, bookmaker_id=2),
+            _row(29, "Empate - Osasuna", "6.00", stamp, name=None, original_label=None, bookmaker_id=2),
+        ],
+        kickoff=kickoff,
+        home_id=3,
+        away_id=4,
+        home_name="Osasuna",
+        away_name="Real Madrid",
+    )
+    assert set(osasuna["htft"]["closing"]["probs"]) == {"1/X", "X/1"}
+    # Fixture 19439499: Draw live, Tie and Empate stopped, all 3.00 on 0-0.
+    scores = parse_odds_rows(
+        [
+            _row(30, "Draw", "3.00", "2026-01-26T19:55:00Z", name="0-0", stopped=False, bookmaker_id=2),
+            _row(30, "Tie", "3.00", "2026-01-26T17:12:00Z", name="0-0", stopped=True, bookmaker_id=2),
+            _row(30, "Empate", "3.00", "2026-01-26T02:19:00Z", name="0-0", stopped=True, bookmaker_id=2),
+            _row(30, "1", "6.00", "2026-01-26T19:55:00Z", name="1-0", bookmaker_id=2),
+        ],
+        kickoff="2026-01-26T21:00:00Z",
+        home_id=1,
+        away_id=2,
+    )
+    assert scores["opening_and_closing"] is False
+    assert scores["ht_correct_score"]["history"] is False
+    assert "0-0" in scores["ht_correct_score"]["closing"]["probs"]
+    # Fixture 19439470: both labels stopped, same 1-0 price, Athletic aliases.
+    athletic = parse_odds_rows(
+        [
+            _row(30, "Athletic Bilbao", "3.50", "2026-01-26T19:11:49Z", name="1-0", stopped=True, bookmaker_id=2),
+            _row(30, "Athletic Club", "3.50", "2026-01-26T17:21:50Z", name="1-0", stopped=True, bookmaker_id=2),
+            _row(30, "Draw", "4.00", "2026-01-26T19:11:49Z", name="0-0", stopped=True, bookmaker_id=2),
+        ],
+        kickoff="2026-01-26T21:00:00Z",
+        home_id=10,
+        away_id=20,
+        home_name="Athletic Club",
+        away_name="Real Madrid",
+    )
+    assert athletic["opening_and_closing"] is False
+    assert "1-0" in athletic["ht_correct_score"]["closing"]["probs"]
+    moved = parse_odds_rows(
+        [
+            _row(30, "Athletic Club", "3.50", "2026-01-26T17:21:50Z", name="1-0", stopped=True, bookmaker_id=2),
+            _row(30, "Athletic Bilbao", "4.20", "2026-01-26T19:11:49Z", name="1-0", stopped=True, bookmaker_id=2),
+            _row(30, "Draw", "4.00", "2026-01-26T19:11:49Z", name="0-0", stopped=True, bookmaker_id=2),
+        ],
+        kickoff="2026-01-26T21:00:00Z",
+        home_id=10,
+        away_id=20,
+        home_name="Athletic Club",
+        away_name="Real Madrid",
+    )
+    assert moved["ht_correct_score"]["history"] is True
+    assert moved["opening_and_closing"] is True
+
+
+def test_prematch_timestamps_parse_without_a_per_row_pandas_call():
+    import time
+    from datetime import datetime, timezone
+
+    kickoff = datetime(2026, 1, 26, 21, 0, tzinfo=timezone.utc)
+    rows = [
+        {
+            "value": "2.10",
+            "latest_bookmaker_update": "2026-01-26T19:11:49Z" if index % 2 == 0 else "2026-01-26 22:00:00",
+        }
+        for index in range(20000)
+    ]
+    from laliga.data.quotes import is_prematch_quote
+
+    started = time.perf_counter()
+    kept = sum(1 for row in rows if is_prematch_quote(row, kickoff))
+    elapsed = time.perf_counter() - started
+    assert kept == 10000
+    assert elapsed < 1.0

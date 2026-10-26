@@ -85,6 +85,8 @@ _OUTCOME_SIDES = {
     "home": "home",
     "1": "home",
     "draw": "draw",
+    "tie": "draw",
+    "empate": "draw",
     "x": "draw",
     "away": "away",
     "2": "away",
@@ -430,13 +432,10 @@ def _prematch_odd_rows(fixture: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def _as_utc(value: Any) -> pd.Timestamp | None:
-    if value is None or value == "":
-        return None
-    stamp = pd.to_datetime(value, utc=True, errors="coerce")
-    if pd.isna(stamp):
-        return None
-    return pd.Timestamp(stamp)
+def _as_utc(value: Any):
+    from laliga.data.quotes import _stamp
+
+    return _stamp(value)
 
 
 def _price_time(row: dict[str, Any]) -> pd.Timestamp | None:
@@ -448,7 +447,7 @@ def _price_time(row: dict[str, Any]) -> pd.Timestamp | None:
 
 
 def _is_before_kickoff(row: dict[str, Any], kickoff: pd.Timestamp | None) -> bool:
-    """Same pre-match rule as the quotes file, including a post-kickoff settlement touch."""
+    """Same pre-match rule as the quotes file. A timestamp at or after kickoff is dropped."""
 
     from laliga.data.quotes import is_prematch_quote
 

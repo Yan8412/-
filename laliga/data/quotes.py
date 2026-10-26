@@ -12,8 +12,8 @@ existing 1X2 request. A missing market or a missing field leaves that block
 empty. A quote whose timestamp is at or after kickoff is dropped, including
 rows with ``stopped`` or ``winning`` set. Live rows carry ``winning: false``,
 so that field cannot separate settlement from in-play. A missing timestamp
-stays. Opening exists only when the same selection has two live timestamps.
-A stopped duplicate of a live row is not a second timestamp.
+stays. Opening exists only when the same selection has two different prices.
+A repeated timestamp with the same price, including an all-stopped alias, is one quote.
 
 Direct prices (HT/FT, correct score, half-time result, half-time correct
 score, odd/even) are stored for comparison. The rate solver uses 1X2,
@@ -26,6 +26,7 @@ import contextvars
 import json
 import math
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -36,7 +37,7 @@ from laliga.model.implied_goals import MarketTargets
 from laliga.model.joint import HTFT_CODES
 
 # Bump when a stored odds_quotes.json record must be parsed again from the cached raw payload.
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 _TEAM_NAMES: contextvars.ContextVar[tuple[str, str]] = contextvars.ContextVar("laliga_team_names", default=("", ""))
 
 MARKET_NAMES = {
@@ -63,6 +64,7 @@ _SIDE = {
     "1": "home",
     "draw": "draw",
     "tie": "draw",
+    "empate": "draw",
     "x": "draw",
     "away": "away",
     "2": "away",
@@ -76,6 +78,7 @@ _HTFT_WORDS = {
     "1": "1",
     "draw": "X",
     "tie": "X",
+    "empate": "X",
     "x": "X",
     "away": "2",
     "2": "2",
@@ -356,7 +359,7 @@ def _handicap_market(rows) -> dict | None:
         for _book, stamp, side, line, price, _stopped in items:
             home_line = line if convention == "home" or side == "home" else -line
             atoms.setdefault((_line_key(home_line), side), []).append((stamp, price))
-        book_history = any(len({stamp for stamp, _price in quotes}) >= 2 for quotes in atoms.values())
+        book_history = any(_prices_differ(quotes) for quotes in atoms.values())
         history = history or book_history
         closing_books.append(_handicap_book(atoms, earliest=False))
         if book_history:
@@ -389,9 +392,9 @@ def _labelled_market(rows, labeler) -> dict | None:
 def _book_snapshots(rows, select):
     """Earliest and latest price of each selection.
 
-    History is true only when one selection (one side, or one line and side)
-    has two timestamps. Different selections updated a minute apart are still
-    a single price.
+    History is true only when one selection has two different prices. The same
+    price at another time is one quote, including all-stopped alias labels.
+    Different selections updated a minute apart are still a single price.
     """
 
     grouped: dict[int, dict[tuple, list[tuple[pd.Timestamp, float]]]] = {}
@@ -412,7 +415,7 @@ def _book_snapshots(rows, select):
     history = False
     for atoms in grouped.values():
         live_atoms = {key: _without_stopped_duplicates(quotes) for key, quotes in atoms.items()}
-        book_history = any(len({stamp for stamp, _price, _stopped in quotes}) >= 2 for quotes in live_atoms.values())
+        book_history = any(_prices_differ(quotes) for quotes in live_atoms.values())
         history = history or book_history
         closing_books.append(_book_from_atoms(live_atoms, earliest=False))
         if book_history:
@@ -438,6 +441,17 @@ def _without_stopped_duplicates(quotes: list[tuple]) -> list[tuple]:
 
     live = [item for item in quotes if not item[2]]
     return live if live else list(quotes)
+
+
+def _prices_differ(quotes: list[tuple]) -> bool:
+    """True when the selection actually moved, not only its timestamp."""
+
+    seen: set[float] = set()
+    for item in quotes:
+        seen.add(round(float(item[1]), 4))
+        if len(seen) >= 2:
+            return True
+    return False
 
 
 def _is_stopped(row: dict) -> bool:
@@ -806,7 +820,10 @@ def is_prematch_quote(row: dict, kickoff) -> bool:
         return False
     if _decimal(row.get("value")) is None:
         return False
-    kickoff_ts = kickoff if isinstance(kickoff, pd.Timestamp) else _stamp(kickoff)
+    if isinstance(kickoff, datetime):
+        kickoff_ts = None if isinstance(kickoff, pd.Timestamp) and pd.isna(kickoff) else kickoff
+    else:
+        kickoff_ts = _stamp(kickoff)
     stamp = _quote_time(row)
     if kickoff_ts is None or stamp is None:
         return True
@@ -907,7 +924,7 @@ def _line_key(value: float) -> float:
     return round(float(value), 4)
 
 
-def _quote_time(row: dict) -> pd.Timestamp | None:
+def _quote_time(row: dict) -> datetime | None:
     for key in ("latest_bookmaker_update", "updated_at", "created_at"):
         stamp = _stamp(row.get(key))
         if stamp is not None:
@@ -915,13 +932,32 @@ def _quote_time(row: dict) -> pd.Timestamp | None:
     return None
 
 
-def _stamp(value) -> pd.Timestamp | None:
+def _stamp(value) -> datetime | None:
+    """UTC timestamp. The hot path is ``datetime.fromisoformat``, not pandas."""
+
     if value is None or value == "":
         return None
-    stamp = pd.to_datetime(value, utc=True, errors="coerce")
-    if pd.isna(stamp):
+    if isinstance(value, datetime):
+        if isinstance(value, pd.Timestamp) and pd.isna(value):
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    text = str(value).strip()
+    if not text or text.lower() in {"nat", "none", "nan"}:
         return None
-    return pd.Timestamp(stamp)
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        stamp = pd.to_datetime(value, utc=True, errors="coerce")
+        if pd.isna(stamp):
+            return None
+        return pd.Timestamp(stamp).to_pydatetime().astimezone(timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _side(row: dict) -> str | None:

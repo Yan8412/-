@@ -160,12 +160,15 @@ def format_tracks(payload: dict) -> str:
         )
     text = _table(rows)
     weight = payload.get("blend_rate_weight") or {}
-    if weight:
+    if weight.get("n_matches"):
         text += (
-            f"\n参数混合的市场权重：起点 {weight.get('start')}，终点 {weight.get('end')}，中位数 {weight.get('median')}。"
+            f"\n参数混合的市场权重：起点 {_weight_number(weight.get('start'))}，"
+            f"终点 {_weight_number(weight.get('end'))}，中位数 {_weight_number(weight.get('median'))}。"
             f"计分 {weight.get('n_days')} 个评测日、{weight.get('n_matches')} 场"
             f"（不同权重值 {weight.get('n_distinct_weights')} 个）。"
         )
+    else:
+        text += "\n参数混合的市场权重：混合还没有开始计分。"
     for note in payload.get("notes") or []:
         text += f"\n{note}"
     direct = payload.get("direct_markets") or {}
@@ -173,6 +176,16 @@ def format_tracks(payload: dict) -> str:
     if priced:
         text += "\n直接盘（只作对照）：" + "，".join(priced) + "。"
     return text + "\n以上为概率估计，不是投注建议。"
+
+
+def _weight_number(value) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if number != number:
+        return "—"
+    return f"{number:.2f}"
 
 
 def format_history(report: dict, *, limit: int = 20) -> str:
