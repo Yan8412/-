@@ -12,6 +12,8 @@ from pathlib import Path
 import pandas as pd
 
 from laliga.archive import PredictionArchive, history_report, reconstruct_season
+from dataclasses import replace
+
 from laliga.config import DEFAULT_MIN_TRAIN_MATCHES, DEFAULT_SEASONS, DEFAULT_XI, ModelConfig, api_token, project_data_dir
 from laliga.data.client import SportMonksError, open_client
 from laliga.data.football_data import HistoryError, format_history_build, import_history, load_history
@@ -21,7 +23,15 @@ from laliga.data.parse import fixtures_to_frame
 from laliga.data.store import MatchStore
 from laliga.model.dixon_coles import FitError
 from laliga.model.service import ScorelineModel, fit_models
-from laliga.pipeline import archive_scored, dashboard_items, score_fixtures, write_dashboard_latest, write_latest_next
+from laliga.pipeline import (
+    annotate_market_items,
+    archive_alternative_tracks,
+    archive_scored,
+    dashboard_items,
+    score_fixtures,
+    write_dashboard_latest,
+    write_latest_next,
+)
 from laliga.report import (
     format_availability_report,
     format_backtest,
@@ -63,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="laliga",
-        description="西甲（La Liga）比赛预测：全场胜平负、半场胜平负、最可能的三个比分。",
+        description="西甲（La Liga）比赛预测：联合半全场分布下的全场胜平负、半场胜平负、前两比分（仍保留前三）和半全场。",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -102,6 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     train = sub.add_parser("train", help="用全部完场比赛拟合模型并保存")
     _add_model_args(train)
+    train.add_argument("--ignore-champion", action="store_true", help="不用注册表里的冠军参数")
     train.set_defaults(func=cmd_train)
 
     backtest = sub.add_parser("backtest", help="按时间顺序走步回测，并与历史频率基准比较")
@@ -113,6 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"每个评测日之前至少要有多少场完场比赛（默认 {DEFAULT_MIN_TRAIN_MATCHES}）",
     )
     backtest.add_argument("--output", type=str, default="", help="把回测 JSON 写到这个路径")
+    backtest.add_argument("--ignore-champion", action="store_true", help="不用注册表里的冠军参数")
     backtest.set_defaults(func=cmd_backtest)
 
     compare = sub.add_parser(
@@ -148,7 +160,41 @@ def build_parser() -> argparse.ArgumentParser:
     boost = compare.add_mutually_exclusive_group()
     boost.add_argument("--xgboost", dest="with_xgboost", action="store_const", const=True, help="训练 XGBoost 对照")
     boost.add_argument("--no-xgboost", dest="with_xgboost", action="store_const", const=False, help="不训练 XGBoost")
+    compare.add_argument("--ignore-champion", action="store_true", help="不用注册表里的冠军参数")
     compare.set_defaults(with_xgboost=None, func=cmd_compare)
+
+    tracks = sub.add_parser(
+        "compare-tracks",
+        help="走步比较纯足球、市场反推进球、以及两者的混合（不进每日更新）",
+    )
+    _add_model_args(tracks)
+    tracks.add_argument("--min-train", type=int, default=DEFAULT_MIN_TRAIN_MATCHES)
+    tracks.add_argument("--output", type=str, default="", help="默认 predictions/tracks_comparison.json")
+    tracks.add_argument("--refit-every", type=int, default=1, help="每隔多少个 UTC 日重拟合足球模型")
+    tracks.add_argument("--history", choices=("sportmonks", "football-data"), default="sportmonks")
+    tracks.add_argument("--since", type=int, default=None)
+    tracks.add_argument("--ignore-champion", action="store_true")
+    tracks.set_defaults(func=cmd_compare_tracks)
+
+    upgrade = sub.add_parser("upgrade", help="按样本外准确率调参，只有挑战者更好才升为冠军")
+    _add_model_args(upgrade)
+    upgrade.add_argument("--trials", type=int, default=12, help="optuna 试验次数。没装 optuna 时改用少量固定参数")
+    upgrade.add_argument("--holdout", type=int, default=80, help="留作样本外的最近完场场数，不参与调参")
+    upgrade.add_argument("--min-train", type=int, default=DEFAULT_MIN_TRAIN_MATCHES)
+    upgrade.add_argument("--min-promote", type=int, default=40, help="样本外少于此场数时不更换已有冠军")
+    upgrade.add_argument("--rule", choices=("bootstrap", "strict"), default="bootstrap")
+    upgrade.add_argument("--refit-every", type=int, default=14)
+    upgrade.add_argument("--rollback", action="store_true", help="退回上一版冠军，不重新搜索")
+    upgrade.add_argument("--history", choices=("sportmonks", "football-data"), default="sportmonks")
+    upgrade.add_argument("--since", type=int, default=None, help="football-data 历史从哪个赛季起始年算起")
+    upgrade.set_defaults(func=cmd_upgrade)
+
+    probe = sub.add_parser("probe", help="用真实 token 查看最近西甲比赛实际返回了哪些赔率市场和 xG 字段")
+    _add_data_dir(probe)
+    probe.add_argument("--days", type=int, default=21, help="往回看多少天")
+    probe.add_argument("--limit", type=int, default=6, help="最多检查多少场")
+    probe.add_argument("--json", type=str, default="", help="把探测结果写入这个 JSON")
+    probe.set_defaults(func=cmd_probe)
 
     predict = sub.add_parser("predict", help="预测未开赛比赛")
     _add_model_args(predict)
@@ -165,6 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="同时写操作台读取的 predictions/latest.json 和 latest.csv（含比分矩阵）",
     )
     predict.add_argument("--no-archive", action="store_true", help="不写入 archive/predictions.jsonl（临时查看时用）")
+    predict.add_argument("--ignore-champion", action="store_true", help="不用注册表里的冠军参数")
     predict.add_argument(
         "--availability",
         action="store_true",
@@ -302,7 +349,19 @@ def cmd_train(args: argparse.Namespace) -> int:
     print(format_team_table(document["ft"], "全场"))
     print()
     source = "半场进球单独拟合" if model.ht_source == "first_half" else "半场由全场参数按进球比例缩放（半场样本不足）"
-    print(format_team_table(document["ht"], f"半场（{source}）"))
+    print(format_team_table(document["ht"], f"上半场（{source}）"))
+    print()
+    if model.joint_model and model.sh is not None:
+        print(format_team_table(document["sh"], "下半场"))
+        print()
+        print(
+            f"联合分布：上半场 × 下半场，状态系数 η = {model.state_eta:.3f}。"
+            "全场胜平负、半场胜平负、比分和半全场都从这张分布边际得到。"
+        )
+        if model.xg_weight:
+            print(f"xG 权重 {model.xg_weight:.3f}（几何混合到上下半场期望进球）。")
+    else:
+        print("半场样本不足，未做联合分布。半场概率和全场概率各自加总为 1，但不保证半场比分不超过全场。")
     print()
     print(f"模型已保存到 {store.model_path}")
     return 0
@@ -321,6 +380,76 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     print(format_backtest(report))
     if output is not None:
         print(f"\n回测 JSON 已写入 {output}")
+    return 0
+
+
+def cmd_compare_tracks(args: argparse.Namespace) -> int:
+    from laliga.model.tracks import compare_tracks, quotes_for_root
+    from laliga.report import format_tracks
+
+    store = _store(args)
+    if args.history == "football-data":
+        history = load_history(store.root, since=args.since)
+    else:
+        history = _filter_since(_require_history(store), args.since)
+    config = _config(args, min_train=args.min_train)
+    report = compare_tracks(
+        history,
+        config,
+        quotes=quotes_for_root(store.root),
+        refit_every_days=max(args.refit_every, 1),
+    )
+    output = Path(args.output) if args.output else store.predictions_dir / "tracks_comparison.json"
+    _write_utf8(output, json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    print(format_tracks(report.to_dict()))
+    print(f"\n三条预测对照已写入 {output}")
+    return 0
+
+
+def cmd_upgrade(args: argparse.Namespace) -> int:
+    from laliga.model.tracks import quotes_for_root
+    from laliga.upgrade import format_upgrade_report, rollback, upgrade
+
+    store = _store(args)
+    if args.rollback:
+        print(rollback(store.root))
+        return 0
+    if args.history == "football-data":
+        history = load_history(store.root, since=args.since)
+    else:
+        history = _require_history(store)
+    config = _config(args, min_train=args.min_train)
+    # Search from the defaults, not from the current champion, so a challenger can move.
+    config = replace(config, xg_weight=0.0, eta_scale=1.0, nb_dispersion=1.0, sh_rate_scale=1.0, temperature=1.0)
+    result = upgrade(
+        history,
+        config,
+        store.root,
+        quotes=quotes_for_root(store.root),
+        n_trials=args.trials,
+        holdout_matches=args.holdout,
+        min_promote=args.min_promote,
+        rule=args.rule,
+        refit_every_days=max(args.refit_every, 1),
+    )
+    print(format_upgrade_report(result.report))
+    print(f"\n注册表：{store.root / 'models' / 'registry.json'}")
+    print(f"准确率记录：{store.root / 'predictions' / 'accuracy_history.md'}")
+    return 0
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    from laliga.data.probe import format_probe, probe_recent
+
+    store = _store(args)
+    client = _client(store, refresh=False)
+    report = probe_recent(client, days=args.days, limit=args.limit)
+    print(format_probe(report))
+    if args.json:
+        _write_utf8(Path(args.json), json.dumps(report, ensure_ascii=False, indent=2))
+        print(f"\n探测 JSON 已写入 {args.json}")
+    if report.get("error") and not report.get("fixtures"):
+        return 1
     return 0
 
 
@@ -392,11 +521,16 @@ def cmd_predict(args: argparse.Namespace) -> int:
         write_latest_next(Path(args.json), predictions)
     if args.publish:
         label = "下一轮" if args.next else f"{args.start.isoformat()} 至 {args.end.isoformat()}"
-        write_dashboard_latest(store, dashboard_items(scored), label=label, note=note)
+        items = dashboard_items(scored)
+        annotate_market_items(items, scored, history, store.root)
+        write_dashboard_latest(store, items, label=label, note=note)
     archived = None
     if not args.no_archive:
         origin = "cli:predict --next" if args.next else "cli:predict --from/--to"
         archived = archive_scored(store, scored, history, origin=origin)
+        others = archive_alternative_tracks(store, scored, history, origin=origin)
+        if others:
+            print(f"市场/混合存档：另写入 {others} 行（不计入纯足球命中率）。")
     print(format_predictions(predictions))
     if args.csv:
         print(f"\nCSV 已写入 {args.csv}")
@@ -667,12 +801,20 @@ def _filter_since(frame: pd.DataFrame, since: int | None) -> pd.DataFrame:
 
 
 def _config(args: argparse.Namespace, min_train: int) -> ModelConfig:
-    return ModelConfig(
+    config = ModelConfig(
         xi=args.xi,
         max_iter=args.max_iter,
         min_matches=args.min_matches,
         min_train_matches=min_train,
     )
+    if getattr(args, "ignore_champion", False):
+        return config
+    from laliga.upgrade import apply_champion
+
+    config = apply_champion(config, project_data_dir(getattr(args, "data_dir", "") or None))
+    if getattr(args, "xi", DEFAULT_XI) != DEFAULT_XI:
+        config = replace(config, xi=args.xi)
+    return config
 
 
 def _add_data_dir(parser: argparse.ArgumentParser) -> None:

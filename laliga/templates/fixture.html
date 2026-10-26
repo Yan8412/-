@@ -9,6 +9,10 @@
   <p>全场 {{ '%.1f'|format(item.ft.home * 100) }}% / {{ '%.1f'|format(item.ft.draw * 100) }}% / {{ '%.1f'|format(item.ft.away * 100) }}%
     · 半场 {{ '%.1f'|format(item.ht.home * 100) }}% / {{ '%.1f'|format(item.ht.draw * 100) }}% / {{ '%.1f'|format(item.ht.away * 100) }}%</p>
   <p class="muted">期望进球 全场 {{ '%.2f'|format(item.expected_goals_ft.home) }}-{{ '%.2f'|format(item.expected_goals_ft.away) }}，半场 {{ '%.2f'|format(item.expected_goals_ht.home) }}-{{ '%.2f'|format(item.expected_goals_ht.away) }}。绿色格子是全场概率最高的三个比分。</p>
+  {% set htft_pairs = item.top_htft|default([], true) %}
+  {% if htft_pairs %}
+  <p>半全场前两档：{% for pair in htft_pairs[:2] %}{{ pair.code }} {{ '%.1f'|format(pair.probability * 100) }}%{% if not loop.last %}，{% endif %}{% endfor %}。{% if item.joint %}这些数字和上面的胜平负来自同一张上下半场联合分布。{% endif %}</p>
+  {% endif %}
   {% elif match is not none %}
   <h2>{{ match.home_team_name }} 对 {{ match.away_team_name }}</h2>
   <p class="empty">这场比赛不在最近一次预测里，所以没有赛前概率表。最近一次预测里的比赛才会带完整比分分布。开球前存档的预测在<a href="{{ url_for('history_page') }}">历史记录</a>里。</p>

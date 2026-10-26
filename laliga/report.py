@@ -49,7 +49,16 @@ def format_predictions(predictions: list[Prediction]) -> str:
                 _score(item.top_scores[2]),
             ]
         )
-    return _table(body) + "\n以上为模型估计的概率，不是投注建议。"
+    lines = [_table(body)]
+    for item in predictions:
+        if item.top2_scores:
+            scores = "、".join(_score(score) for score in item.top2_scores[:2])
+            lines.append(f"{item.home_team} vs {item.away_team} 全场前两比分：{scores}")
+        if item.top_htft:
+            pairs = "、".join(f"{code} {probability * 100:.1f}%" for code, probability in item.top_htft[:2])
+            lines.append(f"{item.home_team} vs {item.away_team} 半全场前两档：{pairs}")
+    lines.append("以上为模型估计的概率，不是投注建议。全场、半场和半全场来自同一张联合分布（半场样本不足时退回两套独立矩阵）。")
+    return "\n".join(lines)
 
 
 def predictions_frame(predictions: list[Prediction]) -> pd.DataFrame:
@@ -115,6 +124,48 @@ def latest_next_problem(payload) -> str:
             if set(item[market]) != {"home", "away"}:
                 return f"第 {index + 1} 项 {market} 不是 home/away"
     return ""
+
+
+def format_tracks(payload: dict) -> str:
+    """Chinese table for football vs market vs blend."""
+
+    labels = {
+        "football": "纯足球",
+        "football_on_market_rows": "纯足球（有赔率的场次）",
+        "market": "市场",
+        "blend_rates": "参数几何混合",
+        "blend_log": "概率对数混合",
+    }
+    header = ["轨道", "全场对数损失", "全场 Brier", "全场 RPS", "半场对数损失", "半全场对数损失", "前两比分", "n"]
+    rows = [header]
+    for key, label in labels.items():
+        block = (payload.get("tracks") or {}).get(key) or {}
+        if not block.get("n"):
+            rows.append([label, "—", "—", "—", "—", "—", "—", "0"])
+            continue
+        rows.append(
+            [
+                label,
+                f"{block['ft_log_loss']:.4f}",
+                f"{block['ft_brier']:.4f}",
+                f"{block['ft_rps']:.4f}",
+                "—" if block.get("ht_log_loss") is None else f"{block['ht_log_loss']:.4f}",
+                "—" if block.get("htft_log_loss") is None else f"{block['htft_log_loss']:.4f}",
+                "—" if block.get("top2_hit_rate") is None else f"{block['top2_hit_rate'] * 100:.1f}%",
+                str(block["n"]),
+            ]
+        )
+    text = _table(rows)
+    weight = payload.get("blend_rate_weight") or {}
+    if weight:
+        text += f"\n参数混合的市场权重：起点 {weight.get('start')}，终点 {weight.get('end')}，中位数 {weight.get('median')}。"
+    for note in payload.get("notes") or []:
+        text += f"\n{note}"
+    direct = payload.get("direct_markets") or {}
+    priced = [f"{name} n={block.get('n')}" for name, block in direct.items() if block.get("n")]
+    if priced:
+        text += "\n直接盘（只作对照）：" + "，".join(priced) + "。"
+    return text + "\n以上为概率估计，不是投注建议。"
 
 
 def format_history(report: dict, *, limit: int = 20) -> str:

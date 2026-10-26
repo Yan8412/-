@@ -32,6 +32,42 @@
   {% endif %}
 </section>
 
+{% if tracks %}
+<section class="panel" id="track-comparison" style="margin-top: 14px">
+  <h2>三条预测对照</h2>
+  <p class="muted">同一走步：纯足球、市场反推进球、参数几何混合、概率对数混合。纯足球 {{ tracks.n_football }} 场，有赔率 {{ tracks.n_market }} 场，混合已经计分 {{ tracks.n_blend }} 场。这些数字来自本机 <code>python -m laliga compare-tracks</code> 写出的文件。</p>
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr><th>轨道</th><th>全场对数损失</th><th>全场 Brier</th><th>全场 RPS</th><th>前两比分</th><th>半场对数损失</th><th>半全场对数损失</th><th>n</th></tr>
+      </thead>
+      <tbody>
+        {% for row in tracks.rows %}
+        <tr>
+          <td>{{ row.label }}</td>
+          <td>{{ row.ft_log_loss }}</td>
+          <td>{{ row.ft_brier }}</td>
+          <td>{{ row.ft_rps }}</td>
+          <td>{{ row.top2 }}</td>
+          <td>{{ row.ht_log_loss }}</td>
+          <td>{{ row.htft_log_loss }}</td>
+          <td>{{ row.n }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% for note in tracks.notes %}
+  <p class="muted">{{ note }}</p>
+  {% endfor %}
+</section>
+{% elif not demo %}
+<section class="panel" style="margin-top: 14px">
+  <h2>三条预测对照</h2>
+  <p class="muted">纯足球、市场和混合的走步表不在「运行回测」里计算。先用 <code>python -m laliga fetch-markets</code> 回填赔率，再运行 <code>python -m laliga compare-tracks --min-train 320 --output data/predictions/tracks_comparison.json</code>。没有这个文件时，这里不显示数字。</p>
+</section>
+{% endif %}
+
 {% if comparison %}
 <section class="panel" id="model-comparison">
   <h2>XGBoost 对照</h2>

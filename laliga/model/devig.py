@@ -156,6 +156,58 @@ def _odds_ratio_probs(raw: np.ndarray, coefficient: np.ndarray) -> np.ndarray:
     return raw / (scale + raw - scale * raw)
 
 
+def devig_vector(raw_implied: np.ndarray, methods: tuple[str, ...] = ("proportional", "power", "shin")) -> dict[str, np.ndarray]:
+    """De-vig one market with two or more outcomes.
+
+    ``raw_implied`` is a 1-d vector of ``1/decimal`` including the overround.
+    A method that cannot price the vector is omitted. Shin's fixed point is
+    the same iteration as the 1X2 case, with one coordinate per outcome.
+    """
+
+    raw = np.asarray(raw_implied, dtype=float).reshape(-1)
+    if raw.size < 2 or not np.isfinite(raw).all() or (raw <= 0).any() or (raw >= 1).any():
+        return {}
+    out: dict[str, np.ndarray] = {}
+    if "proportional" in methods:
+        out["proportional"] = raw / raw.sum()
+    if "power" in methods:
+        powered = _power(raw.reshape(1, -1), np.array([True]))[0]
+        if np.isfinite(powered).all():
+            out["power"] = powered
+    if "shin" in methods and raw.size >= 3:
+        shinned = _shin_general(raw)
+        if shinned is not None:
+            out["shin"] = shinned
+    return out
+
+
+def _shin_general(raw: np.ndarray) -> np.ndarray | None:
+    """Shin fixed point for ``n >= 3`` outcomes. ``n == 3`` matches ``_shin``."""
+
+    chosen = np.asarray(raw, dtype=float).reshape(1, -1)
+    n = chosen.shape[1]
+    if n < 3:
+        return None
+    total = chosen.sum(axis=1, keepdims=True)
+    z = 0.0
+    for _ in range(1000):
+        previous = z
+        inside = z**2 + 4.0 * (1.0 - z) * chosen**2 / total
+        if not np.isfinite(inside).all() or (inside < 0).any():
+            return None
+        z = float(np.sqrt(inside).sum() - 2.0) / (n - 2)
+        if abs(z - previous) < 1e-12:
+            break
+    if not math.isfinite(z) or z <= -0.5 or z >= 0.99:
+        return None
+    inside = z**2 + 4.0 * (1.0 - z) * chosen**2 / total
+    probs = (np.sqrt(np.clip(inside, 0.0, None)) - z) / (2.0 * (1.0 - z))
+    if not np.isfinite(probs).all() or (probs <= 0).any():
+        return None
+    probs = probs / probs.sum()
+    return probs.reshape(-1)
+
+
 def overround(raw_implied: np.ndarray) -> float:
     raw = np.asarray(raw_implied, dtype=float)
     if not np.isfinite(raw).all() or raw.ndim != 1:

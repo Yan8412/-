@@ -29,6 +29,8 @@
           <th>比分 1</th>
           <th>比分 2</th>
           <th>比分 3</th>
+          <th>半全场 1</th>
+          <th>半全场 2</th>
         </tr>
       </thead>
       <tbody>
@@ -47,7 +49,39 @@
           {% for score in item.top_scores %}
           <td>{{ score.home_goals }}-{{ score.away_goals }} {{ '%.1f'|format(score.probability * 100) }}%</td>
           {% endfor %}
+          {% set htft_pairs = item.top_htft|default([], true) %}
+          {% for index in range(2) %}
+          {% if index < htft_pairs|length %}
+          <td>{{ htft_pairs[index].code }} {{ '%.1f'|format(htft_pairs[index].probability * 100) }}%</td>
+          {% else %}
+          <td>—</td>
+          {% endif %}
+          {% endfor %}
         </tr>
+        {% if item.market %}
+        <tr>
+          <td colspan="4" class="muted">市场预测</td>
+          <td>{{ '%.1f'|format(item.market.ft.home * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.market.ft.draw * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.market.ft.away * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.market.ht.home * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.market.ht.draw * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.market.ht.away * 100) }}%</td>
+          <td colspan="5" class="muted">{% if item.market.top_htft %}半全场 {{ item.market.top_htft[0].code }} {{ '%.1f'|format(item.market.top_htft[0].probability * 100) }}%{% endif %}</td>
+        </tr>
+        {% endif %}
+        {% if item.blend %}
+        <tr>
+          <td colspan="4" class="muted">混合（市场权重 {{ '%.2f'|format(item.blend_market_weight|default(0)) }}）</td>
+          <td>{{ '%.1f'|format(item.blend.ft.home * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.blend.ft.draw * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.blend.ft.away * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.blend.ht.home * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.blend.ht.draw * 100) }}%</td>
+          <td>{{ '%.1f'|format(item.blend.ht.away * 100) }}%</td>
+          <td colspan="5" class="muted">{% if item.blend.top_htft %}半全场 {{ item.blend.top_htft[0].code }} {{ '%.1f'|format(item.blend.top_htft[0].probability * 100) }}%{% endif %}</td>
+        </tr>
+        {% endif %}
         {% endfor %}
       </tbody>
     </table>

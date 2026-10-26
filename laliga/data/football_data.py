@@ -9,13 +9,17 @@ collected before the match (Friday afternoon for a weekend, Tuesday afternoon
 for midweek). PSCH/PSCD/PSCA are the closing prices and are not available at
 the time this project makes a prediction. B365H/D/A is the Bet365 price from
 the same pre-closing collection. Avg/BbAv is the market average from that
-same snapshot.
+same snapshot. Over/under 2.5 (P>2.5 / PC>2.5 and the Bet365 and average
+aliases) and the Asian handicap (AHh / AHCh, with Pinnacle or Bet365 prices)
+are stored the same way. The site does not publish the first price of the
+market, so "pre" here is that earlier snapshot, not the opening tick.
 """
 
 from __future__ import annotations
 
 import csv
 import io
+import math
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -42,6 +46,23 @@ _ODDS_GROUPS = {
     "avg_pre": (("AvgH", "BbAvH"), ("AvgD", "BbAvD"), ("AvgA", "BbAvA")),
     "max_pre": (("MaxH", "BbMxH"), ("MaxD", "BbMxD"), ("MaxA", "BbMxA")),
 }
+# football-data.co.uk does not publish the first price. The columns without a
+# trailing C are the earlier snapshot (Friday afternoon, or Tuesday for a
+# midweek round). The C columns are the closing line. OU 2.5 and the Asian
+# handicap use the same split. AHh is the home handicap.
+_OU_PRE = (("ou25_pre_over", ("P>2.5", "B365>2.5", "Avg>2.5", "BbAv>2.5")), ("ou25_pre_under", ("P<2.5", "B365<2.5", "Avg<2.5", "BbAv<2.5")))
+_OU_CLOSE = (("ou25_close_over", ("PC>2.5", "B365C>2.5", "AvgC>2.5")), ("ou25_close_under", ("PC<2.5", "B365C<2.5", "AvgC<2.5")))
+_AH_PRE = (
+    ("ah_pre_line", ("AHh",), True),
+    ("ah_pre_home", ("PAHH", "B365AHH", "AvgAHH"), False),
+    ("ah_pre_away", ("PAHA", "B365AHA", "AvgAHA"), False),
+)
+_AH_CLOSE = (
+    ("ah_close_line", ("AHCh",), True),
+    ("ah_close_home", ("PCAHH", "B365CAHH", "AvgCAHH"), False),
+    ("ah_close_away", ("PCAHA", "B365CAHA", "AvgCAHA"), False),
+)
+_TOTAL_COLUMNS = tuple(name for name, _ in (*_OU_PRE, *_OU_CLOSE)) + tuple(name for name, _, _signed in (*_AH_PRE, *_AH_CLOSE))
 
 
 class HistoryError(RuntimeError):
@@ -359,6 +380,11 @@ def _parse_csv(text: str, season_start: int) -> pd.DataFrame:
                 values = [None, None, None]
             for side, value in zip(("home", "draw", "away"), values, strict=True):
                 row[f"{group}_{side}"] = value
+        for column, options in (*_OU_PRE, *_OU_CLOSE):
+            row[column] = _float_cell(_first(raw, options))
+        for column, options, signed in (*_AH_PRE, *_AH_CLOSE):
+            cell = _first(raw, options)
+            row[column] = _signed_cell(cell) if signed else _float_cell(cell)
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -590,6 +616,9 @@ def _copy_odds(base: dict, record) -> None:
         for side in ("home", "draw", "away"):
             value = getattr(record, f"{group}_{side}")
             base[f"{group}_{side}"] = None if value is None or pd.isna(value) else float(value)
+    for column in _TOTAL_COLUMNS:
+        value = getattr(record, column, None)
+        base[column] = None if value is None or pd.isna(value) else float(value)
 
 
 def _set_fair_price(base: dict) -> int:
@@ -634,6 +663,8 @@ def _empty_odds() -> dict:
     for group in (*_ODDS_GROUPS,):
         for side in ("home", "draw", "away"):
             base[f"{group}_{side}"] = None
+    for column in _TOTAL_COLUMNS:
+        base[column] = None
     return base
 
 
@@ -659,6 +690,20 @@ def _int_cell(value) -> int | None:
         return int(float(value))
     except (TypeError, ValueError):
         return None
+
+
+def _signed_cell(value) -> float | None:
+    """Handicap lines may be negative or zero. Blank stays missing."""
+
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def _float_cell(value) -> float | None:

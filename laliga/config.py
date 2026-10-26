@@ -81,6 +81,15 @@ class ModelConfig:
     min_train_matches: int = DEFAULT_MIN_TRAIN_MATCHES
     # Direct half-time fit is used only when at least this many HT scores exist.
     min_ht_matches: int = 30
+    # Football-track levers. Defaults reproduce the Poisson joint model.
+    # xg_weight 0 ignores xG. eta_scale 1 keeps the estimated state effect.
+    # nb_dispersion 1 is Poisson. temperature 1 does not flatten probabilities.
+    xg_weight: float = 0.0
+    eta_scale: float = 1.0
+    pinned_eta: float | None = None
+    nb_dispersion: float = 1.0
+    sh_rate_scale: float = 1.0
+    temperature: float = 1.0
 
 
 def project_data_dir(explicit: str | Path | None = None) -> Path:

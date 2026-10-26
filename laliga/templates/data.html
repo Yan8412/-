@@ -65,6 +65,9 @@
   {% else %}
   <p>上次训练截止 {{ status.model.singapore }} 新加坡（{{ status.model.utc }} UTC）。样本 {{ status.model.n_matches }} 场。</p>
   <p>主场优势 {{ '%.3f'|format(status.model.home_adv) }}，ρ {{ '%.3f'|format(status.model.rho) }}。半场来源：{{ "上半场单独拟合" if status.model.ht_source == "first_half" else "按全场比例缩放" }}。</p>
+  {% if status.model.joint %}
+  <p>全场胜平负、半场胜平负、比分和半全场来自同一张上下半场联合分布。下半场可以随半场领先或落后调整速率。</p>
+  {% endif %}
   {% endif %}
 </section>
 {% endblock %}

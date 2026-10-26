@@ -4,9 +4,16 @@
 
 1. **全场胜平负**概率（主胜 / 平 / 客胜）
 2. **半场胜平负**概率
-3. **最可能的三个全场比分**及其概率
+3. **最可能的两个全场比分**（前三仍会给出）及其概率
+4. **最可能的两个半全场**（九种：1/1、1/X、1/2、X/1、X/X、X/2、2/1、2/X、2/2）
 
-概率来自同一张比分分布表，而不是三套互相矛盾的分类器。半场用单独的上半场进球模型（半场样本不够时，退回到按历史半场进球比例缩放全场期望进球）。
+有上半场比分时，这些概率来自**同一张**（半场比分，全场比分）联合分布，所以半场、全场、比分和半全场不会互相矛盾。半场样本不够时，仍退回到按历史半场进球比例缩放全场期望进球，这时半场和全场是分开的。
+
+三条轨道用同一套输出：
+
+- **纯足球预测**：上下半场 Dixon–Coles，可选地按历史 xG 调整速率
+- **市场预测**：用赛前 1X2、大小球和亚洲让球反推进球，再走同一套卷积
+- **混合**：两侧半场速率的几何平均，以及全场胜平负的对数池。权重只在更早的走步评测日上拟合
 
 这是概率估计，不是投注建议。
 
@@ -22,12 +29,19 @@
 - 主队进球 ≈ exp(联赛基线 + 主场优势 + 主队进攻 − 客队防守)
 - 客队进球 ≈ exp(联赛基线 + 客队进攻 − 主队防守)
 
-进球个数用泊松分布描述，再按 Dixon–Coles（1997）的办法，修正 0-0、1-0、0-1、1-1 这四个低比分的概率（实际比赛里 0-0 和 1-1 比“两个独立泊松”稍微更常见）。把 0 到 10 球的所有比分概率算出来并归一化，就得到一张比分表：
+进球个数用泊松分布描述，再按 Dixon–Coles（1997）的办法，修正 0-0、1-0、0-1、1-1 这四个低比分的概率（实际比赛里 0-0 和 1-1 比“两个独立泊松”稍微更常见）。
 
-- 主队进球多于客队的格子加总 = 主胜概率，平局格子加总 = 平局概率，其余 = 客胜概率
-- 概率最高的三格 = 前三比分
+**联合半全场（默认）**。全场进球 = 上半场进球 + 下半场进球。上半场和下半场各拟合一套 Dixon–Coles 速率。下半场的进球用全场比分减去半场比分，残差为负的行丢掉。可选的状态系数 η：领先一方的下半场期望进球乘 exp(−η)，落后一方乘 exp(+η)，半场打平则不变。η 在训练窗口里用网格搜索，并加一个 N(0, 0.2²) 先验，所以短样本会停在 0。η = 0 就是两个半场独立。把两张半场比分表卷积，得到一张联合分布，再从它读出：
 
-半场是另一套同样结构的参数，只用 API 里的上半场比分来拟合。两套模型互相独立：半场概率自己加总为 1，全场概率自己加总为 1，程序不会强行保证“半场比分不超过全场”。
+- 上半场边际 = 半场胜平负和半场比分（和单独的上半场表一致）
+- 全场边际 = 全场胜平负和全场比分。默认看概率最高的两个，前三仍保留
+- 九种半全场
+
+比分表的全场上限至少是两侧半场上限之和，避免把 6+6 压进更小的格子，因此半场进球不会超过全场。全场 Dixon–Coles 仍然保存，用来打印球队攻防、给伤停调整速率。页面上的胜平负和比分来自卷积，不来自那张独立的全场表。
+
+半场样本少于门槛时不拟合下半场。半场期望进球 = 全场 × 训练集里的半场比例（没有半场比分时是 0.45），`ht_source` 记为 `scaled_full_time`，半场和全场分开。
+
+负二项只改预测分布的方差（离散度 1 就是泊松），不改攻防参数的极大似然。这是 R 包 goalmodel 里负二项边际的想法，没有把那个包引进来。温度校准把每张半场表按 1/T 重新归一化后再卷积，联合分布仍然自洽。xG 权重用开球之前的历史 xG 做对数攻防，几何混合进半场速率。本场 xG 不进预测。
 
 近期比赛权重更高。权重是 `exp(−ξ × 距训练截止日的天数)`。默认 `ξ = 0.0025`，半衰期大约 277 天，所以最近两三个赛季影响大，更早的赛季逐渐变轻。
 
@@ -35,7 +49,43 @@
 
 **升班马和样本很少的球队**：没有历史的球队不会被当成豪门，也不会被当成随机数。程序先看训练集里“第一个赛季之后才出现、并且已经踢满约 15 场”的球队，用他们的平均进攻/防守当作升班马先验；估不出来时先验就是联赛平均（参数为 0）。样本少于 `--min-matches`（默认 10 场）的球队，会按“已赛场次 : 先验强度（默认相当于 12 场）”往这个先验收缩。一场都没踢过的新队，直接使用该先验。
 
-`train` 会把每支球队的进攻、防守打印出来，方便核对模型有没有把强队和弱队分开。
+`train` 会把每支球队的进攻、防守打印出来，方便核对模型有没有把强队和弱队分开。有下半场模型时，终端还会打印下半场攻防和 η。
+
+## 市场预测和混合
+
+市场轨道不拟合球队强弱。它用这一场自己的赛前盘，反解两支球队的全场期望进球，以及上半场进球占比，使 Dixon–Coles 比分表贴近去水位之后的价格。用到的盘口是全场胜平负、进球大小（市场 80）、亚洲让球（市场 6）。有上半场大小（28）或上半场让球（26）时，占比也可以从盘口里解出来，否则用 0.45。没有大小球也没有让球时，两队期望进球之和会被拉向联赛均值 2.55，因为单靠胜平负分不清总进球高低。
+
+去水位沿用仓库里已有的比例法、幂法和 Shin。二项以上的盘用同一套 Shin 不动点；两项盘（大小、让球）不用 Shin。没有加入 `shin` 这个包。
+
+半全场（29）、正确比分（57）、半场胜平负（31）、半场正确比分（30）、进球单双（12）只用来对照和校准，不参与反推进球。报价存在 `data/processed/odds_quotes.json`。每家博彩公司开球前最早的一条是开盘，最晚的一条是收盘。至少两个时间戳才报告“有开盘和收盘”。开球时刻及之后的报价丢掉。预测用收盘之前的最后一口赛前价，不用收盘之后的数字。
+
+混合有两层，都只在更早的评测日上按全场对数损失选权重：
+
+- 参数层：四个半场速率的几何平均。权重是市场一侧的权重
+- 概率层：原有的全场胜平负对数池。权重是足球一侧的权重
+
+## 按准确率升级
+
+每次 `predict` 仍把纯足球预测追加到 `data/archive/predictions.jsonl`，并带上模型版本、联合分布参数、前两比分和半全场。有赛前盘时，市场和混合各再追加一行，`extra.track` 分别是 `market` 和 `blend`。历史命中率只看纯足球那一行，市场行不会把足球行换掉。
+
+`upgrade` 把最近一段完场比赛留作样本外（按 UTC 日切）。optuna 只在更早的比赛上走步，搜索 ξ、L2、ρ 先验、η 缩放、xG 权重、负二项离散度和下半场速率缩放。温度和混合权重也只在这段调参窗口上冻结。样本外只用调参截止时拟合的一个模型计分，不能回头改参数。
+
+注册表在 `data/models/registry.json`。还没有冠军时，第一次成功的搜索成为冠军，样本外数字只作记录。已经有冠军时，挑战者的全场对数损失至少要低 0.005，并且 RPS 不能变差超过 0.002，才会替换。样本外场次少于 `--min-promote` 时不更换已有冠军。`upgrade --rollback` 换回上一版。中文记录写在 `data/predictions/accuracy_history.md`。
+
+每日 `auto_update.ps1` 不传 `--ignore-champion`，所以下一轮训练和预测会用上新冠军。每周用 `auto_upgrade.ps1`（Windows 任务计划程序），或在任何系统上运行 `python -m laliga upgrade`。
+
+## 用了哪些库
+
+| 库 | 决定 |
+| --- | --- |
+| optuna | 使用。升级命令的贝叶斯搜索。没装时退回三组固定参数 |
+| shin | 不加入。去水位已经是纯 Python，和 1X2 的 Shin 同一不动点 |
+| penaltyblog | 不加入。它的 Dixon–Coles 和本仓库是同一似然，比分分布已有梯度测试。Pi rating 不产出联合比分 |
+| soccerdata | 不加入。football-data.co.uk 的 SP1 用标准库直接下载，队名对照已经在仓库里 |
+| lightgbm | 不加入默认依赖，也不进冠军。可选的泊松目标半场模型会多一套重依赖；上下半场速率仍由 Dixon–Coles 给出 |
+| xgboost | 保留原有对照，不进联合分布的冠军 |
+
+R 包 goalmodel 和 implied 只移植想法：负二项预测边际，以及多种去水位。不运行 R。
 
 ## 数据从哪来
 
@@ -108,7 +158,7 @@ python -m laliga web
 五个站内页面：
 
 - **操作台**：上面这些按钮，以及当前缓存了多少场比赛
-- **预测结果**：开球时间同时给出 UTC 和新加坡时间（Asia/Singapore，UTC+8）、主客队、全场胜平负、半场胜平负、概率最高的三个比分。点球队名进入该场的完整比分概率表
+- **预测结果**：开球时间同时给出 UTC 和新加坡时间（Asia/Singapore，UTC+8）、主客队、全场胜平负、半场胜平负、概率最高的三个比分，以及半全场前两档。有赛前盘时，同一张表下面会多一行市场预测；注册表里的混合权重大于 0 时再多一行混合。点球队名进入该场的完整比分概率表
 - **历史记录**：开球前存档的预测和实际比分对照，累计命中率，和「永远猜主胜」「历史频率基准」比较；另有单独标注的「回测重建」
 - **回测结果**：模型和历史频率基准的对数损失、Brier、命中率、前三比分命中率
 - **数据状态**：接口返回的赛季清单、本地比赛表里的赛季和场次、原始响应缓存文件数、上次训练时间
@@ -222,6 +272,17 @@ python -m laliga compare --min-train 320 --output data/predictions/model_compari
 
 订阅没有 Odds & Predictions 或 Pressure Index & xG 时，对应请求返回 HTTP 403，命令会写明缺哪个附加包并停掉这一路，另一路照常写回，不会抛出未处理的异常。某一场没有数据就留空。已经填好的完场比赛下次会跳过；上次确认没有数据的完场比赛也会跳过。未开赛比赛的赔率每次都会重拉，因为收盘价还在变。`--refresh` 忽略缓存并重新请求全部。新抓下来的比分不会把已经回填的赔率或 xG 盖成空值。
 
+1X2 请求成功之后，同一条命令会再要一次扩展盘：亚洲让球 6、进球单双 12、上半场让球 26、上半场进球 28、半全场 29、半场正确比分 30、半场胜平负 31、正确比分 57、进球大小 80。扩展盘 403 只记一句话，不把已经写入的 1X2 清掉。解析结果在 `data/processed/odds_quotes.json`。缺字段的盘留空，不会编造。
+
+想知道当前 token 实际返回了哪些盘、哪些博彩公司、能不能分出开盘和收盘、以及 xG 字段，用探测命令（需要真实 token，本仓库的测试不调用它）：
+
+```bash
+python -m laliga probe
+python -m laliga probe --days 21 --limit 6 --json data/predictions/probe.json
+```
+
+输出只列市场编号、博彩公司 id 和 xG 是否出现。token 不会打印。
+
 xG 进 XGBoost 时只作为**更早比赛**的滚动均值（近 5 场 xG 和 xGA）。本场的 `home_xg` / `away_xg` / `home_xga` / `away_xga` 不是这场的特征。本场赛前赔率可以是这场的特征。
 
 若某次赛程响应里已经带了 `xgfixture`（或文档示例里的 `expected` 数组）或赛前 `odds` / `premiumOdds`，解析器会按同样的规则写入比赛表。滚球赔率仍然不读。
@@ -273,6 +334,8 @@ python -m laliga compare --history football-data --since 2012 --min-train 320 --
 
 导入的是赛果、半场比分，以及 Pinnacle 的赛前盘和收盘盘。PSH/PSD/PSA 是站点在周末前的周五下午、或中场周的周二下午采集的价格：不是开盘第一口，也不是收盘。公平比较用这一组，缺了才用同一时点的 Bet365（B365H/D/A）。PSCH/PSCD/PSCA 是收盘，预测时还没有，所以单独成行并标明「预测时不可用」，不进入混合。市场平均（Avg 或更早赛季的 BbAv）和最高价（Max 或 BbMx）会写入历史表，不单独作为模型行。CSV 的 `Time` 是英国时间（Europe/London）。赛季起始年取自文件名（`1213` 是 2012/13），不从开球月份推断，所以 2020 年 7 月打完的 2019/20 仍算 2019/20。
 
+大小球 2.5 和亚洲让球也读进来，列可以缺。赛前快照优先 Pinnacle（`P>2.5` / `P<2.5`、`PAHH` / `PAHA`、让球线 `AHh`），否则 Bet365，再否则市场平均。收盘列是 `PC>2.5`、`B365C>2.5`、`AHCh` 这一组，只存下来，不拿去预测。`AHh` 是主队让球，可以为 0 或负数。这些列让 `compare-tracks` 在 2024/25 之前也能做市场轨道，不必等 SportMonks 的扩展盘。
+
 2024/25 之后若 SportMonks 和 football-data 是同一天、同一对已对照的球队，比分、半场、fixture id 和球队 id 以 SportMonks 为准。全场比分不一致时记下来，并保留 SportMonks 的比分。队名对照在 `laliga/data/teams.py`，重音和「de」这一类词会先归一化。football-data 也覆盖的赛季里如果还有对不上的 SportMonks 队名，导入直接停止，不会把同一场写成两行。更早、football-data 没有的赛季仍保留原 id。更早赛季没有 xG。长历史对照会在终端和 JSON 里写出评测期每一行公平赛前盘的来源场次（Pinnacle PSH、Bet365、SportMonks，或没有）。Pinnacle 的 PSH 在 2025/26 中途会断，后面的行会落到 Bet365 或 SportMonks。
 
 第二条是原来的 SportMonks 对照，每天重拟合 Dixon–Coles，并训练 XGBoost。第三条读 `history.csv`。不写 `--output` 时，长历史写到 `predictions/model_comparison_history.json`，避免盖掉操作台读的那份 SportMonks 对照。长历史默认每 7 个 UTC 日重拟合一次 Dixon–Coles（`--refit-every 1` 可以改回每天），并且默认不训练 XGBoost（`--xgboost` 打开，`--no-xgboost` 在 SportMonks 对照里关掉）。`--since 2012` 从那个赛季的起始年留到评测里。评测期会跨多个赛季；终端在多于一个赛季时打印分赛季的对数损失和 RPS，并打印主胜概率 0.6–0.8 这一档的校准。`n_folds` 是计分的评测日，`n_refits` 是 Dixon–Coles 的拟合次数。
@@ -301,7 +364,7 @@ python -m laliga predict --from 2026-09-26 --to 2026-10-05 \
 
 ### 预测存档和历史记录
 
-每次 `predict`（以及操作台的两个预测按钮）都会给每场比赛追加一行到 `data/archive/predictions.jsonl`：fixture id、开球 UTC、主客队、全场和半场胜平负、前三比分和概率、期望进球、模型版本、生成时间。文件只追加，不改写。生成时间不早于开球时间的预测会被拒绝，比赛表里已经不是未开赛状态的比赛也会被拒绝。临时看一眼、不想存档时加 `--no-archive`。
+每次 `predict`（以及操作台的两个预测按钮）都会给每场比赛追加一行到 `data/archive/predictions.jsonl`：fixture id、开球 UTC、主客队、全场和半场胜平负、前三比分和概率、期望进球、模型版本、生成时间。联合模型还会在附加字段里记下前两比分、半全场、η 和参数。文件只追加，不改写。生成时间不早于开球时间的预测会被拒绝，比赛表里已经不是未开赛状态的比赛也会被拒绝。临时看一眼、不想存档时加 `--no-archive`。`latest_next.json` 的字段集合不变，通知程序不用改。前两比分和半全场写在操作台的 `latest.json` 和终端输出里。
 
 同一场比赛开球前生成过多次时，历史记录用开球前**最后一次**，也就是当时最后能看到的那组数字。赛果不写进存档，每次从 `matches.csv` 读取再对照：
 
@@ -361,6 +424,38 @@ python -m laliga predict --next --availability
 | `--refit` | 预测时忽略已保存的模型，按开球日前的数据重拟合 |
 | `--data-dir` | 数据目录 |
 
+## 三条预测对照
+
+足球、市场、混合放在同一次走步里。市场概率只用该场自己的赛前盘。混合权重只用更早评测日的全场对数损失，当天和之后的赛果不参与。
+
+```bash
+python -m laliga fetch-markets
+python -m laliga compare-tracks --min-train 320 --output data/predictions/tracks_comparison.json
+python -m laliga compare-tracks --history football-data --since 2012 --min-train 320 --refit-every 7 \
+  --output data/predictions/tracks_comparison_history.json
+```
+
+终端和 JSON 都有纯足球、有赔率场次上的纯足球、市场、参数几何混合、概率对数混合。直接盘（半全场、半场胜平负、正确比分、单双）单独报对数损失，而且只统计报过价的场次。操作台「回测结果」页在 `tracks_comparison.json` 存在时显示这张表；文件不存在时只提示上面的命令。
+
+## 升级、回退、探测
+
+```bash
+python -m laliga upgrade --trials 12 --holdout 80 --min-promote 40
+python -m laliga upgrade --history football-data --since 2012 --trials 12 --holdout 80 --refit-every 14
+python -m laliga upgrade --rollback
+python -m laliga probe --days 21 --limit 6
+python -m laliga predict --next
+python -m laliga train --ignore-champion   # 不用注册表冠军，仍用命令行上的 ξ
+```
+
+Windows 每周任务是仓库根目录的 `auto_upgrade.ps1`，调用的就是上面的 `upgrade`。它不改 `latest_next.json`。下一次 `auto_update.ps1` 训练或预测时会读到新冠军。
+
+没有真实 token 时，下面几件事无法在这台机器上核对，代码按文档写并在缺字段时留空：
+
+- `probe` 实际返回哪些市场、博彩公司和开盘/收盘时间戳
+- `fetch-markets` 的扩展盘和 `include=xGFixture` 在现有订阅里是否 200
+- 半全场、正确比分这些直接盘的标签写法是否和解析器一致
+
 ## 怎么读回测
 
 输出分“全部评测比赛”和每个赛季。每一行都有模型和历史频率基准：
@@ -385,7 +480,7 @@ python -m laliga predict --next --availability
 pytest -q
 ```
 
-测试不访问真实的 SportMonks，也不下载 football-data。解析器用文档里的比分结构（含半场、90 分钟、加时里 `CURRENT` 与 `2ND_HALF` 的差别）；HTTP 客户端用假传输检查分页、429、限流和“缓存里不能出现 token”；模型用合成赛程做拟合、梯度核对、未来比赛不能泄漏进训练，以及走步回测对历史频率基准的比较。XGBoost 对照在合成赛程上和同一次 Dixon–Coles 走步对齐，并检查本场比分、本场 xG、同一天早场和未来比赛不会进入赛前特征。混合权重的测试检查当天和未来的结果不会进入当天的权重或去水位方法的选择，并确认事后最优权重标成样本内。队名对照和历史合并用一份写在测试里的 CSV。`demo` / `predict --next` 也在子进程里离线跑通，并检查 `latest_next.json` 的字段没有变。预测存档的测试检查开球后不能写入、开球前多次生成时取最后一次、比分改期提前时的处理、命中和基准只用预测之前的比赛。新鲜度检查用 `LALIGA_FRESHNESS_NOW` 固定时钟。伤停调整用一份测试里生成的阵容和伤停数据，检查系数能找回真实效应、没有效应时接近 0，以及最后一天的结果不影响更早日期的概率。
+测试不访问真实的 SportMonks，也不下载 football-data。解析器用文档里的比分结构（含半场、90 分钟、加时里 `CURRENT` 与 `2ND_HALF` 的差别）；HTTP 客户端用假传输检查分页、429、限流和“缓存里不能出现 token”；模型用合成赛程做拟合、梯度核对、未来比赛不能泄漏进训练，以及走步回测对历史频率基准的比较。联合分布的测试检查半场边际、九种半全场加总为 1、前两比分和前三比分的长度，以及 `latest_next.json` 的字段没有变。市场轨道用假报价检查开盘/收盘、大小球和让球，并用已知 λ 反推进球。三条预测的混合权重测试检查当天赛果不进入当天的权重。升级测试检查样本外比赛不进入调参、第一次写入冠军、更差的挑战者不升、以及回退。XGBoost 对照在合成赛程上和同一次 Dixon–Coles 走步对齐，并检查本场比分、本场 xG、同一天早场和未来比赛不会进入赛前特征。混合权重的测试检查当天和未来的结果不会进入当天的权重或去水位方法的选择，并确认事后最优权重标成样本内。队名对照和历史合并用一份写在测试里的 CSV。`demo` / `predict --next` 也在子进程里离线跑通，并检查 `latest_next.json` 的字段没有变。预测存档的测试检查开球后不能写入、开球前多次生成时取最后一次、比分改期提前时的处理、命中和基准只用预测之前的比赛。新鲜度检查用 `LALIGA_FRESHNESS_NOW` 固定时钟。伤停调整用一份测试里生成的阵容和伤停数据，检查系数能找回真实效应、没有效应时接近 0，以及最后一天的结果不影响更早日期的概率。
 
 操作台测试用 Playwright 打开真实页面，点每一个按钮，并跟着每一个站内链接和页脚外链走一遍。没有 token 时断言空状态和明确报错。带 token 的用例把 `SPORTMONKS_API_BASE` 指到本机的一个 HTTP 服务，响应外形与 SportMonks v3 相同（`data` / `pagination` / `rate_limit`，以及 401、403、429），真正的 `requests` 客户端会去请求它。日常使用不要设置 `SPORTMONKS_API_BASE`。首次跑这组测试需要：
 
@@ -396,18 +491,19 @@ python -m playwright install --with-deps chromium
 ## 目录
 
 ```
-laliga/            命令行、SportMonks 客户端、Dixon–Coles 模型、XGBoost 对照、回测、操作台
+laliga/            命令行、SportMonks 客户端、联合半全场模型、市场反推进球、升级注册表、回测、操作台
 laliga/templates/  操作台页面
 laliga/static/     操作台样式
 tests/             离线测试，含操作台点击测试和 SportMonks 外形的本地 HTTP 模拟
 data/cache/        原始 API 响应，以及 football-data 的 SP1 CSV（git 忽略）
-data/processed/    matches.csv、seasons.json，以及 import-history 写出的 history.csv
-data/models/       dixon_coles.json
-data/predictions/  预测（latest_next.json、latest.json）、回测、history.json、model_comparison.json，以及长历史的 model_comparison_history.json
-data/archive/      predictions.jsonl（只追加的开球前预测存档）、backtest_reconstruction.jsonl（回测重建）
+data/processed/    matches.csv、seasons.json、odds_quotes.json，以及 import-history 写出的 history.csv
+data/models/       dixon_coles.json、registry.json（冠军参数，可回退）
+data/predictions/  预测（latest_next.json、latest.json）、回测、history.json、model_comparison.json、tracks_comparison.json、accuracy_history.md
+data/archive/      predictions.jsonl（只追加的开球前预测存档，含市场和混合行）、backtest_reconstruction.jsonl（回测重建）
 data/processed/    另有 fetch-availability 写的 lineups.csv、sidelined.csv、availability_fixtures.csv
 docs/              DEPLOY_WINDOWS.md：更新 D:\laliga-predictor 的步骤
 auto_update.ps1    每日任务（Windows PowerShell）
+auto_upgrade.ps1   每周调参（Windows PowerShell）；其他系统用 python -m laliga upgrade
 check_freshness.py 新鲜度检查（同 check-freshness）
 data/demo/         demo 命令的合成数据
 data/web-demo/     python -m laliga web --demo 的合成数据
@@ -431,7 +527,7 @@ python -m laliga predict --from 2026-09-26 --to 2026-10-05 \
   --csv data/predictions/next.csv --json data/predictions/next.json
 ```
 
-以后每周更新：`python -m laliga fetch`（或预测时加 `--refresh`），然后 `python -m laliga train` 与 `python -m laliga predict --next`。每周更新不要跑 `compare`。想把赔率和 xG 补进本地表、再和 Dixon–Coles 比较时：
+以后每周更新：`python -m laliga fetch`（或预测时加 `--refresh`），然后 `python -m laliga train` 与 `python -m laliga predict --next`。Windows 上每日任务是 `auto_update.ps1`，每周任务是 `auto_upgrade.ps1`。每周更新不要跑 `compare`。想把赔率和 xG 补进本地表、再和 Dixon–Coles、市场、混合比较时：
 
 ```bash
 python -m laliga fetch-markets

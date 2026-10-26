@@ -90,6 +90,7 @@ def walk_forward(matches: pd.DataFrame, config: ModelConfig) -> BacktestReport:
                 config,
                 initial_ft=None if previous is None else previous.ft,
                 initial_ht=None if previous is None else previous.ht,
+                initial_sh=None if previous is None else previous.sh,
             )
         except FitError:
             continue
@@ -525,6 +526,7 @@ def _fit_scoreline(train: pd.DataFrame, as_of: pd.Timestamp, config: ModelConfig
         config,
         initial_ft=None if previous is None else previous.ft,
         initial_ht=None if previous is None else previous.ht,
+        initial_sh=None if previous is None else previous.sh,
     )
 
 

@@ -30,6 +30,7 @@ import pandas as pd
 
 from laliga.data.client import SportMonksClient, SportMonksError
 from laliga.data.parse import aggregate_prematch_1x2, team_expected_goals
+from laliga.data.quotes import EXTENDED_FILTER, MARKET_NAMES, absorb_fixture_odds
 from laliga.data.store import MatchStore
 from laliga.model.features import ODDS_FEATURES, odds_features
 
@@ -57,6 +58,8 @@ class MarketFetchResult:
     xg_requested: int
     odds_denied: str | None
     xg_denied: str | None
+    quotes_saved: int = 0
+    extended_note: str | None = None
 
 
 def fetch_stored_markets(
@@ -89,6 +92,7 @@ def fetch_stored_markets(
         denial=ODDS_DENIED,
         chunk_size=chunk_size,
         attempts=attempts,
+        quotes_root=store.root,
     )
     xg_denied = _pull_chunks(
         client,
@@ -101,6 +105,12 @@ def fetch_stored_markets(
         chunk_size=chunk_size,
         attempts=attempts,
     )
+    extended_note = None
+    quotes_saved = 0
+    if odds_denied is None and odds_ids:
+        extended_note, quotes_saved = _pull_extended(client, store.root, frame, odds_ids, chunk_size=chunk_size)
+    elif odds_denied is None:
+        quotes_saved = 0
     store.replace(frame)
     _save_attempts(store, attempts)
     return MarketFetchResult(
@@ -111,6 +121,8 @@ def fetch_stored_markets(
         xg_requested=len(xg_ids),
         odds_denied=odds_denied,
         xg_denied=xg_denied,
+        quotes_saved=quotes_saved,
+        extended_note=extended_note,
     )
 
 
@@ -123,6 +135,11 @@ def format_market_fetch(result: MarketFetchResult) -> str:
         "每家博彩只用开赛前最后一条报价；多家取隐含概率平均后再去掉水位。不请求 inplayOdds。",
         "raw_implied_* 是去水位之前的平均 1/小数赔率。Shin 和幂去水位要用它。"
         "只有去水位概率、没有 raw_implied_* 的完场比赛会再请求一次。",
+        "同一批比赛还会再请求一次其他赛前盘："
+        + "、".join(f"{market_id} {name}" for market_id, name in MARKET_NAMES.items() if market_id != 1)
+        + f"。过滤条件 {EXTENDED_FILTER}。",
+        "这些盘写到 processed/odds_quotes.json。缺某个盘就留空，不影响 1X2 和 xG。",
+        "每家博彩的最早一条赛前报价是开盘，最晚一条是收盘。只有一个时间戳时不算开盘/收盘对照。",
         "xG 是 xGFixture 的 type 5304。home_xga 是客队 xG，away_xga 是主队 xG。",
         "本场 xG 只留给以后的比赛做滚动均值，不会当成这场的特征。",
         "每日 fetch 和操作台「更新数据」不会跑这一步。补新比赛后再执行本命令即可，已有数值的行会跳过。",
@@ -145,6 +162,7 @@ def _pull_chunks(
     denial: str,
     chunk_size: int,
     attempts: dict[str, set[int]],
+    quotes_root=None,
 ) -> str | None:
     if not fixture_ids:
         return None
@@ -168,6 +186,16 @@ def _pull_chunks(
                 except (TypeError, ValueError):
                     continue
                 returned.add(fixture_key)
+                if quotes_root is not None and kind == "odds":
+                    meta = lookup.get(fixture_key)
+                    if meta is not None:
+                        absorb_fixture_odds(
+                            quotes_root,
+                            payload,
+                            kickoff=meta[3],
+                            home_id=meta[1],
+                            away_id=meta[2],
+                        )
                 if _apply_payload(frame, lookup, payload, kind):
                     attempts[kind].discard(fixture_key)
                 else:
@@ -185,6 +213,50 @@ def _pull_chunks(
             if fixture_id not in returned:
                 attempts[kind].add(fixture_id)
     return None
+
+
+def _pull_extended(
+    client: SportMonksClient,
+    root,
+    frame: pd.DataFrame,
+    fixture_ids: list[int],
+    *,
+    chunk_size: int,
+) -> tuple[str | None, int]:
+    """Second odds pass for the markets other than 1X2. A 400 or empty book is not fatal."""
+
+    if not fixture_ids:
+        return None, 0
+    lookup = _fixture_lookup(frame)
+    saved = 0
+    note = None
+    for chunk in _chunks(fixture_ids, chunk_size):
+        try:
+            payloads = list(
+                client.paginate(
+                    "fixtures/multi/" + ",".join(str(item) for item in chunk),
+                    {"include": "odds", "filters": EXTENDED_FILTER},
+                )
+            )
+        except SportMonksError as exc:
+            if _permission_denied(exc):
+                note = "扩展盘口请求被拒绝（HTTP 403）。1X2 和 xG 已经写回，扩展盘留空。"
+                break
+            note = f"扩展盘口这次没有拿到（{exc}）。1X2 不受影响。"
+            continue
+        for payload in payloads:
+            if not isinstance(payload, dict):
+                continue
+            try:
+                fixture_key = int(payload.get("id"))
+            except (TypeError, ValueError):
+                continue
+            meta = lookup.get(fixture_key)
+            if meta is None:
+                continue
+            if absorb_fixture_odds(root, payload, kickoff=meta[3], home_id=meta[1], away_id=meta[2]):
+                saved += 1
+    return note, saved
 
 
 def _apply_payload(frame: pd.DataFrame, lookup: dict[int, tuple[int, int, int, pd.Timestamp | None]], payload: dict, kind: str) -> bool:
