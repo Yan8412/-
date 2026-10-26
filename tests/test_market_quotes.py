@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
-from laliga.data.football_data import parse_seasons
+from laliga.data.football_data import build_history, parse_seasons
 from laliga.data.probe import format_probe, probe_recent
 from laliga.data.quotes import direct_probabilities, parse_odds_rows, targets_from_bundle, targets_from_row
 from laliga.model.devig import devig, devig_vector, raw_implied_from_decimal
@@ -124,8 +125,6 @@ def test_implied_goals_recover_known_rates_from_1x2_and_totals():
 
 
 def test_row_without_totals_still_prices_1x2_and_optional_columns_stay_missing():
-    import pandas as pd
-
     bare = parse_seasons([_BARE], [2024]).iloc[0]
     assert pd.isna(bare["ou25_pre_over"])
     assert pd.isna(bare["ah_pre_line"])
@@ -137,14 +136,18 @@ def test_row_without_totals_still_prices_1x2_and_optional_columns_stay_missing()
 
 
 def test_football_data_reads_over_under_and_asian_handicap():
-    row = parse_seasons([_CSV], [2024]).iloc[0]
+    parsed = parse_seasons([_CSV], [2024])
+    row = parsed.iloc[0]
+    built = build_history(parsed, pd.DataFrame()).frame.iloc[0]
     assert row["ou25_pre_over"] == pytest.approx(1.90)
     assert row["ou25_pre_under"] == pytest.approx(1.90)
     assert row["ou25_close_over"] == pytest.approx(1.80)
     assert row["ah_pre_line"] == pytest.approx(-0.25)
     assert row["ah_pre_home"] == pytest.approx(1.95)
     assert row["ah_close_line"] == pytest.approx(-0.5)
-    targets = targets_from_row(row)
+    targets = targets_from_row(built)
+    assert targets is not None
+    assert built["fair_book"] == "bet365_pre"
     assert targets.ou[0][0] == pytest.approx(2.5)
     assert targets.ah[0][0] == pytest.approx(-0.25)
     assert 0.0 < targets.ou[0][1] < 1.0

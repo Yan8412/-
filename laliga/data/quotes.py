@@ -538,12 +538,12 @@ def _odd_even_label(row: dict) -> dict:
 
 
 def _row_ft_probs(row) -> tuple[float, float, float] | None:
-    raw = [_row_float(row, f"raw_implied_{side}") for side in ("home", "draw", "away")]
-    if all(value is not None and 0 < value < 1 for value in raw):
+    raw = [_row_probability(row, f"raw_implied_{side}") for side in ("home", "draw", "away")]
+    if all(value is not None for value in raw):
         fair = devig([raw])["proportional"][0]
         return float(fair[0]), float(fair[1]), float(fair[2])
-    implied = [_row_float(row, f"implied_{side}") for side in ("home", "draw", "away")]
-    if all(value is not None and value > 0 for value in implied):
+    implied = [_row_probability(row, f"implied_{side}") for side in ("home", "draw", "away")]
+    if all(value is not None for value in implied):
         total = sum(implied)
         return tuple(value / total for value in implied)
     odds = [_row_float(row, f"odds_{side}") for side in ("home", "draw", "away")]
@@ -551,6 +551,15 @@ def _row_ft_probs(row) -> tuple[float, float, float] | None:
         fair = devig(raw_implied_from_decimal(odds))["proportional"][0]
         return float(fair[0]), float(fair[1]), float(fair[2])
     return None
+
+
+def _row_probability(row, name: str) -> float | None:
+    """A stored probability, not a decimal price. ``_row_float`` rejects numbers at or below 1."""
+
+    number = _row_float(row, name, positive_ok=True)
+    if number is None or not 0.0 < number < 1.0:
+        return None
+    return number
 
 
 def _row_float(row, name: str, positive_ok: bool = False):

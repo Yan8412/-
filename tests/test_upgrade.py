@@ -72,6 +72,10 @@ def test_promotion_rules():
     promoted, _reason = _decide(better, champion, rule="bootstrap", min_promote=40)
     assert promoted
     promoted, reason = _decide(better, champion, rule="strict", min_promote=40)
+    assert promoted
+    assert "升为冠军" in reason
+    small = {"football": {"n": 10, "ft_log_loss": 0.50, "ft_rps": 0.10}}
+    promoted, reason = _decide(small, champion, rule="strict", min_promote=40)
     assert promoted is False
     assert "40" in reason
 
