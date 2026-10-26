@@ -57,7 +57,14 @@ def probe_recent(client: SportMonksClient, *, days: int = 21, limit: int = 6) ->
         xg = xg_payloads.get(fixture_id) or {}
         kickoff = base.get("starting_at")
         home_id, away_id = _ids(base)
-        bundle = parse_odds_rows(_odd_rows(odds), kickoff=kickoff, home_id=home_id or 0, away_id=away_id or 0)
+        bundle = parse_odds_rows(
+            _odd_rows(odds),
+            kickoff=kickoff,
+            home_id=home_id or 0,
+            away_id=away_id or 0,
+            home_name=home,
+            away_name=away,
+        )
         xg_fields = _xg_summary(xg, home_id, away_id)
         reports.append(
             {

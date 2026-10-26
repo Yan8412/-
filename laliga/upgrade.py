@@ -1,11 +1,12 @@
 """Walk-forward retune, calibrate, and promote a challenger without leakage.
 
 The most recent finished matches are a holdout. Optuna (or a small grid, if
-optuna is not installed) only sees matches before that window. The champion
-is replaced only when the challenger has a lower full-time log loss on the
-holdout and does not give back a material amount of RPS. The holdout model
-is fit on matches strictly before the window, so the promotion decision
-cannot see those results during tuning.
+optuna is not installed) only sees matches before that window. The champion is replaced when the challenger improves the holdout target:
+blend full-time log loss when both sides scored a blend on every holdout
+match, otherwise the football full-time log loss. The other metrics stay
+inside a tolerance. Rollback is unchanged. The holdout model is fit on
+matches strictly before the window, so the promotion decision cannot see
+those results during tuning.
 
 Temperature is fit on the tuning window's out-of-sample 1X2 probabilities
 and then frozen. The geometric blend weight is fit the same way and frozen.
@@ -28,7 +29,7 @@ from laliga.model.dixon_coles import FitError
 from laliga.model.joint import temper_matrix
 from laliga.model.metrics import multiclass_log_loss, multiclass_rps, outcome_index
 from laliga.model.service import ScorelineModel, fit_models
-from laliga.model.tracks import geometric_rates, market_rates_for_row
+from laliga.model.tracks import TRACK_MAX_FT, TRACK_MAX_HALF, TRACK_TEMPERATURE, geometric_rates, market_rates_for_row
 from laliga.model.joint import convolve
 
 REGISTRY_SCHEMA = 1
@@ -222,9 +223,13 @@ def format_upgrade_report(report: dict) -> str:
             f"- 混合 全场对数损失 {blend['ft_log_loss']:.4f}，RPS {blend['ft_rps']:.4f}，"
             f"市场权重 {challenger['params'].get('blend_market_weight')}，n = {blend['n']}"
         )
-    old = (challenger.get("champion_holdout") or {}).get("football") if isinstance(challenger.get("champion_holdout"), dict) else None
+    champion_holdout = challenger.get("champion_holdout") if isinstance(challenger.get("champion_holdout"), dict) else {}
+    old = champion_holdout.get("football") if isinstance(champion_holdout, dict) else None
     if old:
         lines.append(f"- 原冠军在同一窗口的全场对数损失 {old['ft_log_loss']:.4f}，RPS {old['ft_rps']:.4f}")
+    old_blend = champion_holdout.get("blend") if isinstance(champion_holdout, dict) else None
+    if isinstance(old_blend, dict) and old_blend.get("n") and old_blend.get("ft_log_loss") is not None:
+        lines.append(f"- 原冠军在同一窗口的混合全场对数损失 {old_blend['ft_log_loss']:.4f}，n = {old_blend['n']}")
     lines.extend(["", "## 参数", "", "```"])
     for key, value in challenger["params"].items():
         lines.append(f"{key}: {value}")
@@ -403,11 +408,17 @@ def _score(model: ScorelineModel, holdout: pd.DataFrame, quotes: dict, blend_wei
         implied = market_rates_for_row(match, quotes)
         rates = model.half_rates(int(match["home_team_id"]), int(match["away_team_id"]))
         if implied is not None:
-            forecast = implied.forecast(eta=0.0, max_half=6, max_ft=10)
+            forecast = implied.forecast(
+                eta=0.0, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE
+            )
             market_probs.append(forecast.ft_probs)
             if rates is not None and blend_weight > 0:
                 blended = geometric_rates(rates, implied.half_rates(), blend_weight)
-                blend_probs.append(convolve(blended, max_half=6, max_ft=10).ft_probs)
+                blend_probs.append(
+                    convolve(
+                        blended, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE
+                    ).ft_probs
+                )
     y_arr = np.array(y, dtype=int)
     football = _pack(y_arr, np.array(football_probs, dtype=float), top2_hit)
     if ht_probs:
@@ -457,6 +468,9 @@ def _decide(challenger: dict, champion: dict | None, *, rule: str, min_promote: 
     old = champion["football"]
     loss_delta = football["ft_log_loss"] - old["ft_log_loss"]
     rps_delta = football["ft_rps"] - old["ft_rps"]
+    blend_target = _blend_target(challenger, champion)
+    if blend_target is not None:
+        return _decide_blend(blend_target, loss_delta, rps_delta, challenger, champion, rule=rule)
     if rule == "strict":
         if loss_delta < -1e-4 and rps_delta <= 0.005:
             return True, "样本外全场对数损失更低，RPS 没有明显变差，升为冠军。"
@@ -467,6 +481,73 @@ def _decide(challenger: dict, champion: dict | None, *, rule: str, min_promote: 
     if loss_delta < -0.005 and rps_delta <= 0.002:
         return True, "样本外全场对数损失至少低 0.005，且 RPS 没有上升超过 0.002，升为冠军。"
     return False, "样本外改进不够大（对数损失需要至少低 0.005，且 RPS 不能变差超过 0.002），冠军不变。"
+
+
+def _blend_target(challenger: dict, champion: dict) -> float | None:
+    """Blend full-time log loss gap when both models scored a blend on the whole holdout."""
+
+    football_n = int(challenger["football"]["n"])
+    old_n = int((champion.get("football") or {}).get("n") or -1)
+    if football_n <= 0 or football_n != old_n:
+        return None
+    new = _track_loss(challenger.get("blend"), "ft_log_loss", expected_n=football_n)
+    old = _track_loss(champion.get("blend"), "ft_log_loss", expected_n=old_n)
+    if new is None or old is None:
+        return None
+    return new - old
+
+
+def _decide_blend(
+    blend_delta: float,
+    football_delta: float,
+    rps_delta: float,
+    challenger: dict,
+    champion: dict,
+    *,
+    rule: str,
+) -> tuple[bool, str]:
+    """Promote on blend log loss. Football, RPS, and HT/FT may not regress past the tolerance."""
+
+    strict = rule == "strict"
+    gain = 1e-4 if strict else 0.005
+    football_limit = 0.005 if strict else 0.01
+    rps_limit = 0.005 if strict else 0.002
+    htft_delta = _optional_delta(challenger, champion, "htft_log_loss")
+    htft_ok = htft_delta is None or htft_delta <= football_limit
+    if blend_delta < -gain and football_delta <= football_limit and rps_delta <= rps_limit and htft_ok:
+        return True, "样本外混合全场对数损失更低，其余指标没有超出容差，升为冠军。"
+    return False, "样本外混合对数损失改进不够，或足球、RPS、半全场超出容差，冠军不变。"
+
+
+def _track_loss(block, key: str, *, expected_n: int) -> float | None:
+    if not isinstance(block, dict) or int(block.get("n") or 0) != expected_n:
+        return None
+    value = block.get(key)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _optional_delta(challenger: dict, champion: dict, key: str) -> float | None:
+    new = _finite((challenger.get("football") or {}).get(key))
+    old = _finite((champion.get("football") or {}).get(key))
+    if new is None or old is None:
+        return None
+    return new - old
+
+
+def _finite(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def _library_notes() -> list[str]:

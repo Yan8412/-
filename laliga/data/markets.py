@@ -7,9 +7,11 @@ This module is the one-off (and later incremental) pass:
   request. Type 5304 only. xGA is the opponent's xG.
 * Odds: ``GET /fixtures/multi/{ids}?include=odds&filters=markets:1``.
   Market 1 is Fulltime Result. ``inplayOdds`` is never requested. A quote
-  at or after kickoff is dropped unless ``stopped`` or ``winning`` marks a
-  settlement update of the pre-match row. The remaining bookmakers are
-  averaged and de-vigged.
+  at or after kickoff is always dropped, including rows with ``stopped``
+  or ``winning`` set. A missing timestamp stays. The remaining bookmakers
+  are averaged and de-vigged. ``--refresh`` replaces that fixture's quote
+  record. A stored record whose ``parser_version`` is not current is
+  parsed again from the cached payload.
 
 A second run asks again for rows that are still missing odds, for finished
 rows that have a de-vigged price but no ``raw_implied_*`` (Shin and power
@@ -31,7 +33,14 @@ import pandas as pd
 
 from laliga.data.client import SportMonksClient, SportMonksError
 from laliga.data.parse import aggregate_prematch_1x2, team_expected_goals
-from laliga.data.quotes import EXTENDED_FILTER, MARKET_NAMES, absorb_fixture_odds, load_quotes, save_quotes
+from laliga.data.quotes import (
+    EXTENDED_FILTER,
+    MARKET_NAMES,
+    PARSER_VERSION,
+    absorb_fixture_odds,
+    load_quotes,
+    save_quotes,
+)
 from laliga.data.store import MatchStore
 from laliga.model.features import ODDS_FEATURES, odds_features
 
@@ -81,7 +90,21 @@ def fetch_stored_markets(
     attempts = _load_attempts(store)
     if force:
         attempts = {"odds": set(), "xg": set()}
-    odds_ids = [int(row.fixture_id) for row in frame.itertuples(index=False) if _wants_odds(row, force, attempts["odds"])]
+    stored_quotes = load_quotes(store.root)
+    stale_ids = _stale_quote_ids(frame, stored_quotes)
+    odds_ids = []
+    seen_odds: set[int] = set()
+    for row in frame.itertuples(index=False):
+        try:
+            fixture_id = int(row.fixture_id)
+        except (TypeError, ValueError):
+            continue
+        if fixture_id in seen_odds:
+            continue
+        if _wants_odds(row, force, attempts["odds"]) or fixture_id in stale_ids:
+            odds_ids.append(fixture_id)
+            seen_odds.add(fixture_id)
+    replace_ids = set(odds_ids) if force else stale_ids
     xg_ids = [int(row.fixture_id) for row in frame.itertuples(index=False) if _wants_xg(row, force, attempts["xg"])]
     odds_denied = _pull_chunks(
         client,
@@ -94,6 +117,7 @@ def fetch_stored_markets(
         chunk_size=chunk_size,
         attempts=attempts,
         quotes_root=store.root,
+        replace_ids=replace_ids,
     )
     xg_denied = _pull_chunks(
         client,
@@ -134,7 +158,9 @@ def format_market_fetch(result: MarketFetchResult) -> str:
         f"完场且主客 xG 都有：{result.xg_complete} 场（本次计划请求 {result.xg_requested} 场）。",
         "赔率来自赛前 include=odds、filters=markets:1（全场胜平负）。",
         "每家博彩只用赛前最后一条报价；多家取隐含概率平均后再去掉水位。不请求 inplayOdds。",
-        "latest_bookmaker_update 早于开球的保留。不早于开球时，只有 stopped 为真或带 winning 字段才保留，这是赛前盘结算碰过时间，不是滚球。其余开球后的报价丢掉。",
+        "latest_bookmaker_update 早于开球的保留。不早于开球的一律丢掉，包括 stopped 为真和 winning 为 false 的行。现场盘每一行都带 winning，不能靠它把结算和滚球分开。没有时间戳的保留。显式滚球标记一律丢掉。某个盘筛完没有报价，就留空。",
+        "同一选项已经有未停盘的报价时，更早的 stopped 行不算第二口。Tie 与 Draw、队名与 1/2 先归一成同一选项。",
+        "带 --refresh 时，这场的记录整份替换，这次响应里没有的盘不会留下。不带 --refresh 时，parser_version 不是当前解析器的记录会用缓存里的原始赔率再解析。",
         "raw_implied_* 是去水位之前的平均 1/小数赔率。Shin 和幂去水位要用它。"
         "只有去水位概率、没有 raw_implied_* 的完场比赛会再请求一次。",
         "同一批比赛还会再请求一次其他赛前盘："
@@ -165,6 +191,7 @@ def _pull_chunks(
     chunk_size: int,
     attempts: dict[str, set[int]],
     quotes_root=None,
+    replace_ids: set[int] | None = None,
 ) -> str | None:
     if not fixture_ids:
         return None
@@ -196,11 +223,14 @@ def _pull_chunks(
                             absorb_fixture_odds(
                                 quotes_root,
                                 payload,
-                                kickoff=meta[3],
-                                home_id=meta[1],
-                                away_id=meta[2],
+                                kickoff=meta.kickoff,
+                                home_id=meta.home_id,
+                                away_id=meta.away_id,
+                                home_name=meta.home_name,
+                                away_name=meta.away_name,
                                 store=quote_store,
                                 flush=False,
+                                replace=fixture_key in (replace_ids or set()),
                             )
                     if _apply_payload(frame, lookup, payload, kind):
                         attempts[kind].discard(fixture_key)
@@ -239,9 +269,12 @@ def _pull_extended(
     lookup = _fixture_lookup(frame)
     quote_store = load_quotes(root)
     try:
-        return _pull_extended_chunks(
+        note, saved = _pull_extended_chunks(
             client, root, fixture_ids, lookup=lookup, quote_store=quote_store, chunk_size=chunk_size
         )
+        if note is None:
+            _stamp_parser_version(quote_store, fixture_ids)
+        return note, saved
     finally:
         save_quotes(root, quote_store)
 
@@ -249,7 +282,11 @@ def _pull_extended(
 def _pull_extended_chunks(client, root, fixture_ids, *, lookup, quote_store, chunk_size: int):
     saved = 0
     note = None
+    total = len(fixture_ids)
+    seen = 0
     for chunk in _chunks(fixture_ids, chunk_size):
+        seen += len(chunk)
+        logger.info("回填扩展盘 %s/%s 场", seen, total)
         try:
             payloads = list(
                 client.paginate(
@@ -276,17 +313,20 @@ def _pull_extended_chunks(client, root, fixture_ids, *, lookup, quote_store, chu
             if absorb_fixture_odds(
                 root,
                 payload,
-                kickoff=meta[3],
-                home_id=meta[1],
-                away_id=meta[2],
+                kickoff=meta.kickoff,
+                home_id=meta.home_id,
+                away_id=meta.away_id,
+                home_name=meta.home_name,
+                away_name=meta.away_name,
                 store=quote_store,
                 flush=False,
+                replace=False,
             ):
                 saved += 1
     return note, saved
 
 
-def _apply_payload(frame: pd.DataFrame, lookup: dict[int, tuple[int, int, int, pd.Timestamp | None]], payload: dict, kind: str) -> bool:
+def _apply_payload(frame: pd.DataFrame, lookup: dict[int, "_FixtureMeta"], payload: dict, kind: str) -> bool:
     fixture_id = payload.get("id")
     try:
         fixture_key = int(fixture_id)
@@ -295,7 +335,7 @@ def _apply_payload(frame: pd.DataFrame, lookup: dict[int, tuple[int, int, int, p
     meta = lookup.get(fixture_key)
     if meta is None:
         return False
-    index, home_id, away_id, kickoff = meta
+    index, home_id, away_id, kickoff = meta.index, meta.home_id, meta.away_id, meta.kickoff
     if kind == "xg":
         home_xg, away_xg, home_xga, away_xga = team_expected_goals(payload, home_id, away_id)
         _assign(frame, index, "home_xg", home_xg)
@@ -326,8 +366,18 @@ def _assign(frame: pd.DataFrame, index: int, column: str, value: float | None) -
     frame.at[index, column] = value
 
 
-def _fixture_lookup(frame: pd.DataFrame) -> dict[int, tuple[int, int, int, pd.Timestamp | None]]:
-    lookup: dict[int, tuple[int, int, int, pd.Timestamp | None]] = {}
+@dataclass(frozen=True)
+class _FixtureMeta:
+    index: int
+    home_id: int
+    away_id: int
+    kickoff: pd.Timestamp | None
+    home_name: str
+    away_name: str
+
+
+def _fixture_lookup(frame: pd.DataFrame) -> dict[int, _FixtureMeta]:
+    lookup: dict[int, _FixtureMeta] = {}
     for index, row in frame.iterrows():
         try:
             fixture_id = int(row["fixture_id"])
@@ -337,8 +387,54 @@ def _fixture_lookup(frame: pd.DataFrame) -> dict[int, tuple[int, int, int, pd.Ti
             continue
         kickoff = row["starting_at"]
         stamp = None if pd.isna(kickoff) else pd.Timestamp(kickoff)
-        lookup[fixture_id] = (int(index), home_id, away_id, stamp)
+        lookup[fixture_id] = _FixtureMeta(
+            int(index),
+            home_id,
+            away_id,
+            stamp,
+            _team_text(row, "home_team_name"),
+            _team_text(row, "away_team_name"),
+        )
     return lookup
+
+
+def _team_text(row, name: str) -> str:
+    if name not in getattr(row, "index", ()):
+        return ""
+    value = row[name]
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return ""
+    return str(value)
+
+
+def _stale_quote_ids(frame: pd.DataFrame, quotes: dict) -> set[int]:
+    """Records parsed by an older parser, including records with no version."""
+
+    stale: set[int] = set()
+    if "fixture_id" not in frame.columns:
+        return stale
+    for fixture_id in frame["fixture_id"].tolist():
+        try:
+            key = int(fixture_id)
+        except (TypeError, ValueError):
+            continue
+        record = quotes.get(str(key))
+        if not isinstance(record, dict):
+            continue
+        try:
+            version = int(record.get("parser_version") or 0)
+        except (TypeError, ValueError):
+            version = 0
+        if version != PARSER_VERSION:
+            stale.add(key)
+    return stale
+
+
+def _stamp_parser_version(store: dict, fixture_ids: list[int]) -> None:
+    for fixture_id in fixture_ids:
+        record = store.get(str(fixture_id))
+        if isinstance(record, dict):
+            record["parser_version"] = PARSER_VERSION
 
 
 def _field(row, name: str):

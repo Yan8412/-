@@ -188,6 +188,42 @@ def normalize_team_name(name: str) -> str:
     return " ".join("".join(cleaned).split())
 
 
+def same_club(left: str, right: str) -> bool:
+    """True when two labels are the same club, including known spelling variants.
+
+    Both names are resolved through the alias table first, so Athletic Club
+    and Athletic Bilbao match and Deportivo does not match Deportivo Alavés.
+    A name the table does not know can still match when its remaining tokens
+    are the other name's tokens, or a subset of them.
+    """
+
+    if not str(left).strip() or not str(right).strip():
+        return False
+    left_key = _canonical_or_none(left)
+    right_key = _canonical_or_none(right)
+    if left_key and right_key:
+        return left_key == right_key
+    left_tokens = _club_tokens(left)
+    right_tokens = _club_tokens(right)
+    if not left_tokens or not right_tokens:
+        return False
+    if left_tokens == right_tokens:
+        return True
+    return set(left_tokens) <= set(right_tokens) or set(right_tokens) <= set(left_tokens)
+
+
+def _canonical_or_none(name: str) -> str | None:
+    try:
+        return canonical_team(name)
+    except KeyError:
+        return None
+
+
+def _club_tokens(name: str) -> tuple[str, ...]:
+    key = normalize_team_name(name)
+    return tuple(token for token in key.split() if token not in _NAME_PARTICLES)
+
+
 def canonical_team(name: str) -> str:
     """Map a football-data or SportMonks name onto one canonical key."""
 

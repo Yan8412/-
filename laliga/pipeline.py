@@ -193,7 +193,7 @@ def describe_alternative_tracks(scored: list[ScoredFixture], history: pd.DataFra
 
     from laliga.data.quotes import load_quotes
     from laliga.model.joint import convolve
-    from laliga.model.tracks import geometric_rates, market_rates_for_row
+    from laliga.model.tracks import TRACK_MAX_FT, TRACK_MAX_HALF, TRACK_TEMPERATURE, geometric_rates, market_rates_for_row
     from laliga.upgrade import load_registry
 
     weight = _blend_weight(root, load_registry)
@@ -206,18 +206,23 @@ def describe_alternative_tracks(scored: list[ScoredFixture], history: pd.DataFra
     for item in scored:
         prediction = item.prediction
         lines.append(f"{prediction.home_team} vs {prediction.away_team}")
-        lines.append("  纯足球：" + _prob_phrase(prediction.ft, prediction.top_htft))
+        lines.append("  纯足球：" + _prob_phrase(prediction.ft, prediction.top_htft, prediction.top2_scores))
         row = lookup.get(int(prediction.fixture_id))
         implied = None if row is None else market_rates_for_row(row, quotes)
         if implied is None:
             lines.append("  这场没有赛前 1X2，所以没有市场预测和混合。")
             continue
-        forecast = implied.forecast(eta=0.0, max_half=6, max_ft=12)
+        forecast = implied.forecast(eta=0.0, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE)
         lines.append("  市场：" + _forecast_phrase(forecast))
         if prediction.rates is None:
             lines.append("  混合：这场没有半场速率，不能和市场价格混合。")
             continue
-        blended = convolve(geometric_rates(prediction.rates, implied.half_rates(), weight), max_half=6, max_ft=12)
+        blended = convolve(
+            geometric_rates(prediction.rates, implied.half_rates(), weight),
+            max_half=TRACK_MAX_HALF,
+            max_ft=TRACK_MAX_FT,
+            temperature=TRACK_TEMPERATURE,
+        )
         if weight <= 0:
             lines.append(f"  混合：市场权重为 0，与纯足球相同。{_forecast_phrase(blended)}")
         else:
@@ -242,18 +247,32 @@ def _history_lookup(history: pd.DataFrame) -> dict:
     return lookup
 
 
-def _prob_phrase(market, top_htft) -> str:
+def _prob_phrase(market, top_htft, top_scores=None) -> str:
     pairs = "、".join(f"{code} {probability * 100:.1f}%" for code, probability in (top_htft or [])[:2]) or "无"
     return (
         f"全场 {market.home * 100:.1f}% / {market.draw * 100:.1f}% / {market.away * 100:.1f}%"
-        f"；半全场前两档 {pairs}"
+        f"；前两比分 {_top_scores_phrase(top_scores)}；半全场前两档 {pairs}"
     )
 
 
 def _forecast_phrase(forecast) -> str:
     home, draw, away = forecast.ft_probs
     pairs = "、".join(f"{code} {probability * 100:.1f}%" for code, probability in forecast.top_htft[:2]) or "无"
-    return f"全场 {home * 100:.1f}% / {draw * 100:.1f}% / {away * 100:.1f}%；半全场前两档 {pairs}"
+    return (
+        f"全场 {home * 100:.1f}% / {draw * 100:.1f}% / {away * 100:.1f}%"
+        f"；前两比分 {_top_scores_phrase(forecast.top2_scores)}；半全场前两档 {pairs}"
+    )
+
+
+def _top_scores_phrase(top_scores) -> str:
+    parts = []
+    for item in list(top_scores or [])[:2]:
+        if hasattr(item, "home_goals"):
+            parts.append(f"{item.home_goals}-{item.away_goals} {item.probability * 100:.1f}%")
+            continue
+        home, away, probability = item[0], item[1], item[2]
+        parts.append(f"{int(home)}-{int(away)} {float(probability) * 100:.1f}%")
+    return "、".join(parts) or "无"
 
 
 def annotate_market_items(items: list[dict], scored: list[ScoredFixture], history: pd.DataFrame, root: Path) -> None:
@@ -265,7 +284,7 @@ def annotate_market_items(items: list[dict], scored: list[ScoredFixture], histor
 
     from laliga.data.quotes import load_quotes
     from laliga.model.joint import convolve
-    from laliga.model.tracks import geometric_rates, market_rates_for_row
+    from laliga.model.tracks import TRACK_MAX_FT, TRACK_MAX_HALF, TRACK_TEMPERATURE, geometric_rates, market_rates_for_row
     from laliga.upgrade import load_registry
 
     quotes = load_quotes(root)
@@ -289,11 +308,16 @@ def annotate_market_items(items: list[dict], scored: list[ScoredFixture], histor
         implied = market_rates_for_row(row, quotes)
         if implied is None:
             continue
-        forecast = implied.forecast(eta=0.0, max_half=6, max_ft=12)
+        forecast = implied.forecast(eta=0.0, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE)
         item["market"] = _forecast_brief(forecast)
         football = by_id.get(int(item["fixture_id"]))
         if weight > 0 and football is not None and football.prediction.rates is not None:
-            blended = convolve(geometric_rates(football.prediction.rates, implied.half_rates(), weight), max_half=6, max_ft=12)
+            blended = convolve(
+                geometric_rates(football.prediction.rates, implied.half_rates(), weight),
+                max_half=TRACK_MAX_HALF,
+                max_ft=TRACK_MAX_FT,
+                temperature=TRACK_TEMPERATURE,
+            )
             item["blend"] = _forecast_brief(blended)
             item["blend_market_weight"] = weight
 
@@ -304,7 +328,7 @@ def archive_alternative_tracks(store: MatchStore, scored: list[ScoredFixture], h
     from laliga.archive import PredictionArchive, utc_now
     from laliga.data.quotes import load_quotes
     from laliga.model.service import MarketProb, ScoreProb
-    from laliga.model.tracks import geometric_rates, market_rates_for_row
+    from laliga.model.tracks import TRACK_MAX_FT, TRACK_MAX_HALF, TRACK_TEMPERATURE, geometric_rates, market_rates_for_row
     from laliga.upgrade import load_registry
 
     quotes = load_quotes(store.root)
@@ -328,7 +352,7 @@ def archive_alternative_tracks(store: MatchStore, scored: list[ScoredFixture], h
         implied = market_rates_for_row(row, quotes)
         if implied is None:
             continue
-        forecast = implied.forecast(eta=0.0, max_half=6, max_ft=12)
+        forecast = implied.forecast(eta=0.0, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE)
         market = _retarget(item.prediction, forecast, MarketProb, ScoreProb, track="market")
         result = archive.append(
             [market],
@@ -344,7 +368,9 @@ def archive_alternative_tracks(store: MatchStore, scored: list[ScoredFixture], h
             blended_rates = geometric_rates(football_rates, implied.half_rates(), weight)
             from laliga.model.joint import convolve
 
-            blended = convolve(blended_rates, max_half=6, max_ft=12)
+            blended = convolve(
+                blended_rates, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE
+            )
             blend = _retarget(item.prediction, blended, MarketProb, ScoreProb, track="blend")
             blend_result = archive.append(
                 [blend],

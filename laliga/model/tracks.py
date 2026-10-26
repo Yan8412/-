@@ -33,6 +33,10 @@ from laliga.model.metrics import (
 from laliga.model.service import ScorelineModel, fit_models
 
 MIN_BLEND_HISTORY = 40
+# Market and blend grids stay on the same settings the weight search uses.
+TRACK_MAX_HALF = 5
+TRACK_MAX_FT = 8
+TRACK_TEMPERATURE = 1.0
 logger = logging.getLogger(__name__)
 
 
@@ -151,7 +155,9 @@ def _one(match, model: ScorelineModel, quotes: dict, as_of: pd.Timestamp) -> dic
     market_top2_htft = None
     market_rates = None
     if implied is not None:
-        forecast = implied.forecast(eta=0.0, max_half=6, max_ft=max(model.ft.max_goals, 12))
+        forecast = implied.forecast(
+            eta=0.0, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE
+        )
         market_probs = forecast.ft_probs
         market_ht = forecast.ht_probs
         market_top2 = [(home, away) for home, away, _ in forecast.top2_scores]
@@ -201,7 +207,11 @@ def _attach_blends(rows: list[dict], *, min_history: int, notify=None) -> None:
         cached = []
         for weight in grid:
             blended = geometric_rates(row["football_rates"], row["market_rates"], weight)
-            cached.append(convolve(blended, max_half=5, max_ft=8).ft_probs)
+            cached.append(
+                convolve(
+                    blended, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE
+                ).ft_probs
+            )
         row["_ft_by_weight"] = cached
     history: list[dict] = []
     for _day, day_rows in days:
@@ -211,7 +221,9 @@ def _attach_blends(rows: list[dict], *, min_history: int, notify=None) -> None:
             _say(f"混合评测日 {_day}，历史 {len(history)} 场，市场权重 {weight:.2f}", notify)
             for row in day_rows:
                 blended = geometric_rates(row["football_rates"], row["market_rates"], weight)
-                forecast = convolve(blended, max_half=6, max_ft=12)
+                forecast = convolve(
+                    blended, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE
+                )
                 row["blend_rate_ft"] = forecast.ft_probs
                 row["blend_rate_ht"] = forecast.ht_probs
                 row["blend_rate_htft"] = forecast.htft
@@ -239,7 +251,11 @@ def _best_rate_weight(history: list[dict], grid: list[float]) -> float:
             probs = []
             for row in history:
                 blended = geometric_rates(row["football_rates"], row["market_rates"], weight)
-                probs.append(convolve(blended, max_half=5, max_ft=8).ft_probs)
+                probs.append(
+                    convolve(
+                        blended, max_half=TRACK_MAX_HALF, max_ft=TRACK_MAX_FT, temperature=TRACK_TEMPERATURE
+                    ).ft_probs
+                )
             probs = np.array(probs, dtype=float)
         loss = multiclass_log_loss(y, probs)
         if loss < best_loss - 1e-10:

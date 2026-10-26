@@ -80,6 +80,34 @@ def test_promotion_rules():
     assert "40" in reason
 
 
+def _scored(football_loss: float, blend_loss: float, *, rps: float = 0.21, htft: float | None = None) -> dict:
+    football = {"n": 50, "ft_log_loss": football_loss, "ft_rps": rps}
+    if htft is not None:
+        football["htft_log_loss"] = htft
+    return {"football": football, "blend": {"n": 50, "ft_log_loss": blend_loss, "ft_rps": rps}}
+
+
+def test_blend_log_loss_promotes_when_football_stays_inside_tolerance():
+    champion = _scored(0.90, 0.9228)
+    promoted, reason = _decide(_scored(0.905, 0.9087), champion, rule="bootstrap", min_promote=40)
+    assert promoted
+    assert "升为冠军" in reason
+    promoted, reason = _decide(_scored(0.92, 0.80), champion, rule="bootstrap", min_promote=40)
+    assert promoted is False
+    assert "冠军不变" in reason
+    promoted, reason = _decide(_scored(0.90, 0.9218), champion, rule="bootstrap", min_promote=40)
+    assert promoted is False
+    assert "冠军不变" in reason
+    promoted, reason = _decide(
+        _scored(0.905, 0.9087, htft=1.2),
+        _scored(0.90, 0.9228, htft=1.0),
+        rule="bootstrap",
+        min_promote=40,
+    )
+    assert promoted is False
+    assert "冠军不变" in reason
+
+
 def test_market_archive_line_does_not_replace_the_football_line(tmp_path):
     archive = PredictionArchive(tmp_path)
     football = {

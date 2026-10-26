@@ -9,11 +9,11 @@ SportMonks market ids were checked against ``GET /v3/odds/markets/{id}``:
 
 The daily ``fetch`` does not request these. ``fetch-markets`` does, after the
 existing 1X2 request. A missing market or a missing field leaves that block
-empty. A quote is pre-match when it is not marked in-play and its timestamp
-is before kickoff, or when a post-kickoff ``latest_bookmaker_update`` is only
-a settlement touch (``stopped`` true, or a ``winning`` field). Opening exists
-only when the same selection has two timestamps. One row per selection, even
-with different clocks, is not a price history.
+empty. A quote whose timestamp is at or after kickoff is dropped, including
+rows with ``stopped`` or ``winning`` set. Live rows carry ``winning: false``,
+so that field cannot separate settlement from in-play. A missing timestamp
+stays. Opening exists only when the same selection has two live timestamps.
+A stopped duplicate of a live row is not a second timestamp.
 
 Direct prices (HT/FT, correct score, half-time result, half-time correct
 score, odd/even) are stored for comparison. The rate solver uses 1X2,
@@ -22,6 +22,7 @@ over/under, and Asian handicap only.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import math
 import re
@@ -29,9 +30,14 @@ from pathlib import Path
 
 import pandas as pd
 
+from laliga.data.teams import same_club
 from laliga.model.devig import devig, devig_vector, raw_implied_from_decimal
 from laliga.model.implied_goals import MarketTargets
 from laliga.model.joint import HTFT_CODES
+
+# Bump when a stored odds_quotes.json record must be parsed again from the cached raw payload.
+PARSER_VERSION = 2
+_TEAM_NAMES: contextvars.ContextVar[tuple[str, str]] = contextvars.ContextVar("laliga_team_names", default=("", ""))
 
 MARKET_NAMES = {
     1: "全场胜平负",
@@ -56,6 +62,7 @@ _SIDE = {
     "home": "home",
     "1": "home",
     "draw": "draw",
+    "tie": "draw",
     "x": "draw",
     "away": "away",
     "2": "away",
@@ -68,6 +75,7 @@ _HTFT_WORDS = {
     "home": "1",
     "1": "1",
     "draw": "X",
+    "tie": "X",
     "x": "X",
     "away": "2",
     "2": "2",
@@ -104,31 +112,46 @@ def absorb_fixture_odds(
     kickoff,
     home_id: int,
     away_id: int,
+    home_name: str = "",
+    away_name: str = "",
     store: dict | None = None,
     flush: bool = True,
+    replace: bool = False,
 ) -> bool:
     """Merge one fixture payload into the quotes store.
 
     Pass the same ``store`` and ``flush=False`` while paging, then
-    ``save_quotes`` once. The default still loads and writes the file, so a
-    single call keeps the previous behaviour. True when any market was kept.
+    ``save_quotes`` once. ``replace=True`` drops markets left over from an
+    older parse of this fixture (a refresh, or a parser-version rebuild).
+    True when any market was kept.
     """
 
     try:
         fixture_id = int(payload.get("id"))
     except (TypeError, ValueError):
         return False
-    rows = _odd_rows(payload)
-    if not rows:
-        return False
-    bundle = parse_odds_rows(rows, kickoff=kickoff, home_id=home_id, away_id=away_id)
-    if not bundle.get("markets_seen"):
-        return False
-    bundle["fixture_id"] = fixture_id
     if store is None:
         store = load_quotes(root)
         flush = True
-    previous = store.get(str(fixture_id)) if isinstance(store.get(str(fixture_id)), dict) else {}
+    rows = _odd_rows(payload)
+    bundle = parse_odds_rows(
+        rows,
+        kickoff=kickoff,
+        home_id=home_id,
+        away_id=away_id,
+        home_name=home_name,
+        away_name=away_name,
+    )
+    if not rows or not bundle.get("markets_seen"):
+        if replace:
+            store.pop(str(fixture_id), None)
+            if flush:
+                save_quotes(root, store)
+        return False
+    bundle["fixture_id"] = fixture_id
+    previous = {} if replace else store.get(str(fixture_id)) if isinstance(store.get(str(fixture_id)), dict) else {}
+    if not isinstance(previous, dict):
+        previous = {}
     merged = dict(previous)
     merged.update(bundle)
     seen = set(previous.get("markets_seen") or []) | set(bundle.get("markets_seen") or [])
@@ -149,8 +172,24 @@ def absorb_fixture_odds(
     return True
 
 
-def parse_odds_rows(rows: list[dict], *, kickoff, home_id: int, away_id: int) -> dict:
+def parse_odds_rows(
+    rows: list[dict],
+    *,
+    kickoff,
+    home_id: int,
+    away_id: int,
+    home_name: str = "",
+    away_name: str = "",
+) -> dict:
     kickoff_ts = _stamp(kickoff)
+    token = _TEAM_NAMES.set((home_name or "", away_name or ""))
+    try:
+        return _parse_odds_rows(rows, kickoff_ts=kickoff_ts, home_id=home_id, away_id=away_id)
+    finally:
+        _TEAM_NAMES.reset(token)
+
+
+def _parse_odds_rows(rows: list[dict], *, kickoff_ts, home_id: int, away_id: int) -> dict:
     kept = [row for row in rows if isinstance(row, dict) and is_prematch_quote(row, kickoff_ts)]
     by_market: dict[int, list[dict]] = {}
     bookmakers: set[int] = set()
@@ -301,9 +340,10 @@ def _handicap_market(rows) -> dict | None:
             continue
         book = _int(row.get("bookmaker_id")) or 0
         stamp = _quote_time(row) or pd.Timestamp("1970-01-01", tz="UTC")
-        parsed.append((book, stamp, side, float(line), price))
+        parsed.append((book, stamp, side, float(line), price, _is_stopped(row)))
     if not parsed:
         return None
+    parsed = _drop_stopped_handicaps(parsed)
     by_book: dict[int, list[tuple]] = {}
     for item in parsed:
         by_book.setdefault(item[0], []).append(item)
@@ -313,7 +353,7 @@ def _handicap_market(rows) -> dict | None:
     for items in by_book.values():
         convention = _ah_convention(items)
         atoms: dict[tuple, list[tuple[pd.Timestamp, float]]] = {}
-        for _book, stamp, side, line, price in items:
+        for _book, stamp, side, line, price, _stopped in items:
             home_line = line if convention == "home" or side == "home" else -line
             atoms.setdefault((_line_key(home_line), side), []).append((stamp, price))
         book_history = any(len({stamp for stamp, _price in quotes}) >= 2 for quotes in atoms.values())
@@ -361,20 +401,22 @@ def _book_snapshots(rows, select):
             continue
         book = _int(row.get("bookmaker_id")) or 0
         stamp = _quote_time(row) or pd.Timestamp("1970-01-01", tz="UTC")
+        stopped = _is_stopped(row)
         slot = grouped.setdefault(book, {})
         for key, price in _atomic(selected):
-            slot.setdefault(key, []).append((stamp, float(price)))
+            slot.setdefault(key, []).append((stamp, float(price), stopped))
     if not grouped:
         return None, None, False
     opening_books = []
     closing_books = []
     history = False
     for atoms in grouped.values():
-        book_history = any(len({stamp for stamp, _price in quotes}) >= 2 for quotes in atoms.values())
+        live_atoms = {key: _without_stopped_duplicates(quotes) for key, quotes in atoms.items()}
+        book_history = any(len({stamp for stamp, _price, _stopped in quotes}) >= 2 for quotes in live_atoms.values())
         history = history or book_history
-        closing_books.append(_book_from_atoms(atoms, earliest=False))
+        closing_books.append(_book_from_atoms(live_atoms, earliest=False))
         if book_history:
-            opening_books.append(_book_from_atoms(atoms, earliest=True))
+            opening_books.append(_book_from_atoms(live_atoms, earliest=True))
     opening_books = [item for item in opening_books if item]
     closing_books = [item for item in closing_books if item]
     return opening_books or None, closing_books or None, history
@@ -389,6 +431,17 @@ def _atomic(selected: dict) -> list[tuple[tuple, float]]:
         else:
             atoms.append(((key,), float(value)))
     return atoms
+
+
+def _without_stopped_duplicates(quotes: list[tuple]) -> list[tuple]:
+    """Drop stopped rows when the same selection also has a live price."""
+
+    live = [item for item in quotes if not item[2]]
+    return live if live else list(quotes)
+
+
+def _is_stopped(row: dict) -> bool:
+    return row.get("stopped") in (True, 1, "1", "true", "True")
 
 
 def _book_from_atoms(atoms: dict, *, earliest: bool) -> dict:
@@ -586,11 +639,47 @@ def _htft_label(row: dict) -> dict:
     price = _decimal(row.get("value"))
     if not price:
         return {}
-    for key in ("name", "original_label", "label"):
+    name = str(row.get("name") or "").strip()
+    if name:
+        code = _htft_code(name)
+        if code:
+            return {code: price}
+    home_name, away_name = _TEAM_NAMES.get()
+    code = _htft_from_teams(str(row.get("label") or ""), home_name, away_name)
+    if code:
+        return {code: price}
+    for key in ("original_label", "label"):
         code = _htft_code(str(row.get(key) or ""))
         if code:
             return {code: price}
     return {}
+
+
+def _htft_from_teams(label: str, home_name: str, away_name: str) -> str | None:
+    """``Draw - Valencia`` when the feed has no ``name``."""
+
+    if " - " not in label:
+        return None
+    left, right = label.split(" - ", 1)
+    left_code = _htft_side(left, home_name, away_name)
+    right_code = _htft_side(right, home_name, away_name)
+    if left_code is None or right_code is None:
+        return None
+    code = f"{left_code}/{right_code}"
+    return code if code in HTFT_CODES else None
+
+
+def _htft_side(text: str, home_name: str, away_name: str) -> str | None:
+    lowered = text.strip().lower()
+    if lowered in _HTFT_WORDS:
+        return _HTFT_WORDS[lowered]
+    home = bool(home_name) and same_club(text, home_name) and not (away_name and same_club(text, away_name))
+    away = bool(away_name) and same_club(text, away_name) and not (home_name and same_club(text, home_name))
+    if home:
+        return "1"
+    if away:
+        return "2"
+    return None
 
 
 def _htft_code(text: str) -> str | None:
@@ -704,15 +793,13 @@ def _odd_rows(payload: dict) -> list[dict]:
 
 
 def is_prematch_quote(row: dict, kickoff) -> bool:
-    """Keep a pre-match price, including a settlement touch after kickoff.
+    """Keep a price only when it is not in-play and not timestamped at or after kickoff.
 
-    SportMonks ``odds`` (not ``inplayOdds``) often rewrites
-    ``latest_bookmaker_update`` when the selection is settled, so a finished
-    match can show a timestamp at or after kickoff on the pre-match row.
-    Those rows stay when ``stopped`` is true or ``winning`` is present.
-    Anything else at or after kickoff is dropped, so a live price cannot
-    enter the pre-match average. An explicit in-play flag or an in-play
-    market description is always dropped.
+    Live rows from the pre-match ``odds`` include carry ``winning: false`` and
+    often ``stopped: false``, with ``latest_bookmaker_update`` hours after
+    kickoff. Keeping those rows pulls the closing 1X2 toward the in-play
+    price. A missing timestamp is still kept. An explicit in-play flag or an
+    in-play market description is always dropped.
     """
 
     if not isinstance(row, dict) or _explicit_inplay(row):
@@ -721,9 +808,9 @@ def is_prematch_quote(row: dict, kickoff) -> bool:
         return False
     kickoff_ts = kickoff if isinstance(kickoff, pd.Timestamp) else _stamp(kickoff)
     stamp = _quote_time(row)
-    if kickoff_ts is None or stamp is None or stamp < kickoff_ts:
+    if kickoff_ts is None or stamp is None:
         return True
-    return _settled_touch(row)
+    return stamp < kickoff_ts
 
 
 def _is_prematch(row: dict, kickoff: pd.Timestamp | None) -> bool:
@@ -738,10 +825,16 @@ def _explicit_inplay(row: dict) -> bool:
     return "inplay" in text or "in-play" in text or "in play" in text
 
 
-def _settled_touch(row: dict) -> bool:
-    if row.get("stopped") in (True, 1, "1", "true", "True"):
-        return True
-    return "winning" in row
+def _drop_stopped_handicaps(items: list[tuple]) -> list[tuple]:
+    grouped: dict[tuple, list[tuple]] = {}
+    for item in items:
+        book, _stamp, side, line, _price, _stopped = item
+        grouped.setdefault((book, side, _line_key(line)), []).append(item)
+    kept = []
+    for group in grouped.values():
+        live = [item for item in group if not item[5]]
+        kept.extend(live or group)
+    return kept
 
 
 def _ah_convention(items: list[tuple]) -> str:
@@ -751,8 +844,8 @@ def _ah_convention(items: list[tuple]) -> str:
         return "home"
     if (own_n, own_mono) > (home_n, home_mono):
         return "own"
-    home_lines = {_line_key(line) for _book, _stamp, side, line, _price in items if side == "home"}
-    away_lines = {_line_key(line) for _book, _stamp, side, line, _price in items if side == "away"}
+    home_lines = {_line_key(item[3]) for item in items if item[2] == "home"}
+    away_lines = {_line_key(item[3]) for item in items if item[2] == "away"}
     if home_lines and home_lines == away_lines:
         return "home"
     return "own"
@@ -760,7 +853,7 @@ def _ah_convention(items: list[tuple]) -> str:
 
 def _ah_view(items: list[tuple], mode: str) -> tuple[int, bool]:
     grouped: dict[float, dict[str, float]] = {}
-    for _book, _stamp, side, line, price in items:
+    for _book, _stamp, side, line, price, _stopped in items:
         home_line = line if mode == "home" or side == "home" else -line
         grouped.setdefault(_line_key(home_line), {})[side] = price
     pairs = []
@@ -832,8 +925,10 @@ def _stamp(value) -> pd.Timestamp | None:
 
 
 def _side(row: dict) -> str | None:
+    home_name, away_name = _TEAM_NAMES.get()
     for key in ("label", "name", "original_label"):
-        text = str(row.get(key) or "").strip().lower()
+        raw = str(row.get(key) or "").strip()
+        text = raw.lower()
         if text in _SIDE:
             return _SIDE[text]
         if _SCORE_RE.fullmatch(text.replace(" ", "")):
@@ -841,6 +936,18 @@ def _side(row: dict) -> str | None:
         parts = text.replace("+", " +").replace("-", " -").split()
         if parts and parts[0] in _SIDE and any(character.isdigit() for character in text):
             return _SIDE[parts[0]]
+        if raw and _team_side(raw, home_name, away_name):
+            return _team_side(raw, home_name, away_name)
+    return None
+
+
+def _team_side(text: str, home_name: str, away_name: str) -> str | None:
+    home = bool(home_name) and same_club(text, home_name) and not (away_name and same_club(text, away_name))
+    away = bool(away_name) and same_club(text, away_name) and not (home_name and same_club(text, home_name))
+    if home:
+        return "home"
+    if away:
+        return "away"
     return None
 
 
