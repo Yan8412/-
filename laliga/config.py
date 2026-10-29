@@ -63,6 +63,35 @@ DEFAULT_SEASONS = 3
 DEFAULT_MIN_TRAIN_MATCHES = 320
 DEFAULT_HT_GOAL_RATIO = 0.45
 
+# SportMonks v3 market ids (GET /v3/odds/markets). Standard pre-match feed.
+MARKET_FULLTIME_RESULT = 1
+MARKET_HALF_TIME_FULL_TIME = 29
+MARKET_HALF_TIME_RESULT = 31
+MARKET_CORRECT_SCORE = 57
+ODDS_MARKETS = (
+    MARKET_FULLTIME_RESULT,
+    MARKET_HALF_TIME_RESULT,
+    MARKET_HALF_TIME_FULL_TIME,
+    MARKET_CORRECT_SCORE,
+)
+
+TRACKS = ("football", "market", "combined")
+TRACK_LABELS = {"football": "纯足球", "market": "纯市场", "combined": "综合"}
+PROMOTION_MARKETS = ("ft", "ht", "scores")
+PROMOTION_MARKET_LABELS = {"ft": "全场胜平负", "ht": "半场胜平负", "scores": "前三比分"}
+
+
+@dataclass(frozen=True)
+class PromotionConfig:
+    """When a challenger track replaces the active one for a market."""
+
+    # Matches where all three tracks had a forecast. Below this, nothing changes.
+    min_matches: int = 60
+    # Paired mean improvement divided by its standard error.
+    min_z: float = 1.0
+    # Combined-weight fitting needs this many earlier matches with odds; equal weights before.
+    min_ensemble_rows: int = 40
+
 
 @dataclass(frozen=True)
 class ModelConfig:

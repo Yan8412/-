@@ -67,4 +67,62 @@
   <p>主场优势 {{ '%.3f'|format(status.model.home_adv) }}，ρ {{ '%.3f'|format(status.model.rho) }}。半场来源：{{ "上半场单独拟合" if status.model.ht_source == "first_half" else "按全场比例缩放" }}。</p>
   {% endif %}
 </section>
+
+<section class="panel" style="margin-top: 14px">
+  <h2>赔率</h2>
+  {% if not status.odds.fixtures %}
+  <p class="empty" id="odds-empty">本地还没有赔率。纯市场和综合模型需要 SportMonks Odds add-on。在操作台点击「更新赔率」；订阅读不到赔率时会直接报错，不会填入假赔率。</p>
+  {% else %}
+  <ul class="stats">
+    <li><strong>{{ status.odds.fixtures }}</strong><span class="muted">有赔率的比赛</span></li>
+    <li><strong>{{ status.odds.finished }}</strong><span class="muted">其中完场（可回测）</span></li>
+    <li><strong>{{ status.odds.scheduled }}</strong><span class="muted">其中未开赛</span></li>
+    <li><strong>{{ status.odds.rows }}</strong><span class="muted">报价条数</span></li>
+  </ul>
+  <table>
+    <thead><tr><th>市场（SportMonks market_id）</th><th>有报价的比赛</th></tr></thead>
+    <tbody>
+      {% for market in status.odds.markets %}
+      <tr><td>{{ market.name }}</td><td>{{ market.fixtures }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<section class="panel" style="margin-top: 14px">
+  <h2>启用模型</h2>
+  {% if not status.active.saved %}
+  <p class="empty" id="active-empty">还没有自动升级记录。默认三个市场都用纯足球模型。运行回测后，程序按准确率决定是否升级到纯市场或综合模型。</p>
+  {% else %}
+  <p class="muted">上次判定 {{ status.active.decided_at }}。</p>
+  {% endif %}
+  <table id="active-table">
+    <thead><tr><th>市场</th><th>启用</th><th>原因</th></tr></thead>
+    <tbody>
+      {% for row in status.active.rows %}
+      <tr><td>{{ row.market }}</td><td>{{ row.track }}</td><td>{{ row.reason or "—" }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if status.ensemble %}
+  <p class="muted">综合模型权重：全场 足球 {{ '%.3f'|format(status.ensemble.ft.football) }} / 市场 {{ '%.3f'|format(status.ensemble.ft.market) }}；半场 足球 {{ '%.3f'|format(status.ensemble.ht.football) }} / 市场 {{ '%.3f'|format(status.ensemble.ht.market) }}（{{ status.ensemble.ft.n }} 场回测拟合{% if not status.ensemble.ft.fitted %}，样本不足用等权{% endif %}）。</p>
+  {% endif %}
+  {% if status.active.history %}
+  <h3>最近的判定</h3>
+  <table>
+    <thead><tr><th>时间</th><th>共同比赛</th><th>全场</th><th>半场</th><th>比分</th><th>有变化</th></tr></thead>
+    <tbody>
+      {% for entry in status.active.history %}
+      <tr>
+        <td>{{ entry.decided_at }}</td>
+        <td>{{ entry.n_common }}</td>
+        {% for track in entry.tracks %}<td>{{ track }}</td>{% endfor %}
+        <td>{{ entry.changed }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
 {% endblock %}

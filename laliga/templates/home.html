@@ -30,6 +30,15 @@
   </section>
 
   <section class="card">
+    <h2>更新赔率</h2>
+    <p class="muted">为已抓取的比赛拉取赛前赔率（全场胜平负、半场胜平负、半全场、正确比分）。纯市场和综合模型要用。需要 SportMonks Odds add-on；每场一次请求，完场比赛优先读缓存。</p>
+    <form id="odds-form" method="post" action="{{ url_for('start_odds') }}">
+      <label class="check"><input type="checkbox" name="scheduled_only" value="1"> 只抓未开赛比赛</label>
+      <button type="submit">更新赔率</button>
+    </form>
+  </section>
+
+  <section class="card">
     <h2>训练</h2>
     <p class="muted">用本地全部完场比赛拟合，并保存模型。</p>
     <form id="train-form" method="post" action="{{ url_for('start_train') }}">
@@ -39,7 +48,7 @@
 
   <section class="card">
     <h2>回测</h2>
-    <p class="muted">按日期走步，只使用当天之前的完场比赛，并与历史频率比较。</p>
+    <p class="muted">按日期走步，只使用当天之前的完场比赛，并与历史频率比较。有赔率时同时评测三套模型，并按准确率自动升级启用的模型。</p>
     <form id="backtest-form" method="post" action="{{ url_for('start_backtest') }}">
       <label>最少训练场次
         <input name="min_train" type="number" min="4" value="{{ 18 if demo else 320 }}" required>

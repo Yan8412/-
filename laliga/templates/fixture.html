@@ -17,6 +17,41 @@
   <p>本地记录的全场比分：{{ actual }}。若这场比赛已经用于训练，上面的分布不能当作赛前预测。</p>
   {% endif %}
 </section>
+{% if tracks %}
+<section class="panel" style="margin-top: 14px">
+  <h2>三套模型对比</h2>
+  <p class="muted">「启用」表示该市场当前按回测准确率选用这套模型。概率是估计，不是投注建议。</p>
+  <div class="wrap">
+    <table id="tracks-table">
+      <thead>
+        <tr><th>模型</th><th>全场 胜/平/负</th><th>半场 胜/平/负</th><th>前三比分</th><th>来源</th><th>启用</th></tr>
+      </thead>
+      <tbody>
+        {% for row in tracks %}
+        <tr data-track="{{ row.track }}">
+          <th>{{ row.label }}</th>
+          {% if row.available %}
+          <td>{{ '%.1f'|format(row.ft.home * 100) }}% / {{ '%.1f'|format(row.ft.draw * 100) }}% / {{ '%.1f'|format(row.ft.away * 100) }}%</td>
+          <td>{{ '%.1f'|format(row.ht.home * 100) }}% / {{ '%.1f'|format(row.ht.draw * 100) }}% / {{ '%.1f'|format(row.ht.away * 100) }}%</td>
+          <td>{% for score in row.top_scores %}{{ score.home_goals }}-{{ score.away_goals }} {{ '%.1f'|format(score.probability * 100) }}%{% if not loop.last %}，{% endif %}{% endfor %}</td>
+          <td class="muted">
+            全场：{{ row.sources.ft }}；半场：{{ row.sources.ht }}；比分：{{ row.sources.scores }}
+            {% if row.bookmakers %}<br>博彩公司数 全场 {{ row.bookmakers.ft }}，半场 {{ row.bookmakers.ht }}，比分 {{ row.bookmakers.scores }}；全场平均抽水 {{ '%.1f'|format(row.overround_ft * 100) }}%{% endif %}
+            {% if row.weights %}<br>权重 全场 足球 {{ '%.2f'|format(row.weights.ft.football) }} / 市场 {{ '%.2f'|format(row.weights.ft.market) }}，半场 足球 {{ '%.2f'|format(row.weights.ht.football) }} / 市场 {{ '%.2f'|format(row.weights.ht.market) }}{% endif %}
+            {% for note in row.notes %}<br>{{ note }}{% endfor %}
+          </td>
+          {% else %}
+          <td colspan="4" class="muted">{{ row.notes | join(' ') }}</td>
+          {% endif %}
+          <td>{{ row.active_for | join('、') if row.active_for else '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="muted">下面的比分概率表是纯足球（Dixon–Coles）模型的分布。</p>
+</section>
+{% endif %}
 {% if grids and grids.ft %}
 <section class="panel" style="margin-top: 14px">
   <h2>全场比分概率</h2>

@@ -12,18 +12,19 @@
     ·
     <a href="{{ url_for('download_backtest_json') }}">下载回测 JSON</a>
   </p>
+  <h3>纯足球模型（全部评测比赛）</h3>
   <div class="wrap">
-    <table>
+    <table id="football-metrics">
       <thead>
         <tr><th>指标</th><th>模型</th><th>历史频率基准</th><th>方向</th></tr>
       </thead>
       <tbody>
-        {% for label, model, baseline, direction in rows %}
+        {% for row in rows %}
         <tr>
-          <td>{{ label }}</td>
-          <td>{{ model }}</td>
-          <td>{{ baseline }}</td>
-          <td>{{ direction }}</td>
+          <td>{{ row.label }}</td>
+          <td>{{ row.model }}</td>
+          <td>{{ row.baseline }}</td>
+          <td>{{ row.direction }}</td>
         </tr>
         {% endfor %}
       </tbody>
@@ -31,4 +32,49 @@
   </div>
   {% endif %}
 </section>
+
+{% if report %}
+<section class="panel" style="margin-top: 14px">
+  <h2>三套模型对比</h2>
+  {% if not report.n_common %}
+  <p class="empty" id="no-odds-note">评测比赛里没有一场带本地赔率，只评测了纯足球模型。先在操作台点「更新赔率」（需要 SportMonks Odds add-on），再运行回测。没有赔率时启用模型保持纯足球，不会用假赔率。</p>
+  {% else %}
+  <p class="muted">只比较三套模型都有预测的 {{ report.n_common }} 场比赛（共评测 {{ report.model.n }} 场），所以三列用的是同一批比赛。综合模型每个评测日的权重只用更早的评测结果拟合。</p>
+  <div class="wrap">
+    <table id="track-metrics">
+      <thead>
+        <tr><th>指标</th><th>纯足球</th><th>纯市场</th><th>综合</th><th>历史频率基准</th><th>方向</th></tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td>{{ row.label }}</td>
+          <td>{{ row.common_football }}</td>
+          <td>{{ row.common_market }}</td>
+          <td>{{ row.common_combined }}</td>
+          <td>{{ row.common_baseline }}</td>
+          <td>{{ row.direction }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if ensemble %}
+  <p class="muted">综合模型（对数意见池）最新权重：全场 足球 {{ '%.3f'|format(ensemble.ft.football) }} / 市场 {{ '%.3f'|format(ensemble.ft.market) }}；半场 足球 {{ '%.3f'|format(ensemble.ht.football) }} / 市场 {{ '%.3f'|format(ensemble.ht.market) }}{% if not ensemble.ft.fitted %}（样本不足，等权）{% endif %}。</p>
+  {% endif %}
+  {% endif %}
+</section>
+
+{% if promotion %}
+<section class="panel" style="margin-top: 14px">
+  <h2>自动升级判定</h2>
+  <p class="muted">规则：至少 {{ promotion.rule.min_matches }} 场共同比赛；胜平负看对数损失，前三比分看命中率；挑战者的逐场配对改进至少 {{ promotion.rule.min_z }} 个标准误才替换当前模型。</p>
+  <ul id="promotion-reasons">
+    {% for market, body in promotion.markets.items() %}
+    <li data-market="{{ market }}"><strong>{{ market_labels[market] }}：{{ track_labels[body.track] }}</strong>{% if body.changed %}（由{{ track_labels[body.previous] }}升级）{% endif %}。{{ body.reason }}</li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endif %}
 {% endblock %}
