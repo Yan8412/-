@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from laliga.config import LA_LIGA_LEAGUE_ID
-from laliga.synthetic import generate_synthetic_fixtures
+from laliga.synthetic import generate_synthetic_fixtures, generate_synthetic_odds
 
 PER_PAGE_DEFAULT = 50
 
@@ -22,6 +22,7 @@ PER_PAGE_DEFAULT = 50
 class MockSportMonks:
     def __init__(self) -> None:
         self.fixtures = generate_synthetic_fixtures()
+        self.odds = generate_synthetic_odds(self.fixtures)
         self.mode = "ok"
         self._once_used = False
         self.hits: list[str] = []
@@ -56,7 +57,7 @@ class MockSportMonks:
                 mode = "429"
         if mode == "401":
             return 401, {}, {"message": "Unauthorized"}
-        if mode == "403":
+        if mode == "403" or (mode == "odds-403" and "/odds/" in path):
             return 403, {}, {"message": "You don't have access to this endpoint on your subscription."}
         if mode == "429":
             return (
@@ -99,6 +100,15 @@ class MockSportMonks:
                 if start <= day <= end:
                     rows.append(item)
             return _page(rows, query, path)
+        if relative.startswith("odds/pre-match/fixtures/"):
+            fixture_id = int(relative.rsplit("/", 1)[1])
+            wanted = {int(value) for value in _filter_value(query, "markets").split(",") if value}
+            rows = [
+                item
+                for item in self.odds
+                if item["fixture_id"] == fixture_id and (not wanted or item["market_id"] in wanted)
+            ]
+            return _envelope(rows)
         return {"message": f"no result for {relative}"}
 
 

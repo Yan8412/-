@@ -98,10 +98,11 @@ class SportMonksClient:
         self._last_request_at: float | None = None
         self._session: requests.Session | None = None
 
-    def get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def get(self, path: str, params: dict[str, Any] | None = None, *, refresh: bool | None = None) -> dict[str, Any]:
         query = _clean_params(params)
         cache_path = self.cache_dir / f"{_cache_key(path, query)}.json"
-        if not self.refresh and cache_path.exists():
+        skip_cache = self.refresh if refresh is None else refresh
+        if not skip_cache and cache_path.exists():
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
             body = cached.get("body")
             if isinstance(body, dict):

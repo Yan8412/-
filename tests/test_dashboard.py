@@ -87,6 +87,11 @@ def test_empty_dashboard_every_control_and_external_link(tmp_path: Path, page: P
 
         _submit(page, "训练模型")
         expect(page.locator("[role=alert]")).to_contain_text("没有完场")
+        _click_nav(page, "操作台")
+
+        _submit(page, "更新赔率")
+        expect(page.locator("#job-title")).to_have_text("赔率更新失败")
+        expect(page.locator("[role=alert]")).to_contain_text("没有比赛可以抓赔率")
         _click_nav(page, "预测结果")
         expect(page.get_by_text("还没有预测")).to_be_visible()
         _click_nav(page, "回测结果")
@@ -95,6 +100,8 @@ def test_empty_dashboard_every_control_and_external_link(tmp_path: Path, page: P
         expect(page.get_by_text("比赛表是空的")).to_be_visible()
         expect(page.get_by_text("还没有通过「更新数据」写入赛季清单")).to_be_visible()
         expect(page.get_by_text("还没有训练好的模型")).to_be_visible()
+        expect(page.locator("#odds-empty")).to_contain_text("不会填入假赔率")
+        expect(page.locator("#active-empty")).to_contain_text("纯足球")
         _click_nav(page, "操作台")
 
         _submit(page, "运行回测")
@@ -196,6 +203,23 @@ def test_mocked_sportmonks_pipeline(tmp_path: Path, page: Page, monkeypatch: pyt
         page.get_by_role("link", name="查看赛季和模型详情").click()
         expect(page.get_by_role("heading", name="SportMonks 赛季清单")).to_be_visible()
 
+        mock.set_mode("odds-403")
+        _click_nav(page, "操作台")
+        _submit(page, "更新赔率")
+        expect(page.locator("#job-title")).to_have_text("赔率更新失败")
+        expect(page.locator("[role=alert]")).to_contain_text("Odds add-on")
+
+        mock.set_mode("ok")
+        _click_nav(page, "操作台")
+        _submit(page, "更新赔率", timeout=JOB_WAIT_MS)
+        expect(page.locator("#job-title")).to_have_text("赔率更新完成")
+        expect(page.locator("#log")).to_contain_text("有赔率")
+        assert any("odds/pre-match/fixtures/" in hit and "markets%3A1%2C31%2C29%2C57" in hit for hit in mock.hits)
+        page.locator("#job-result").click()
+        expect(page.get_by_text("有赔率的比赛")).to_be_visible()
+        expect(page.locator("main")).to_contain_text("正确比分（57）")
+        _assert_cache_hides_token(tmp_path / "live", "dashboard-test-token")
+
         _click_nav(page, "操作台")
         _submit(page, "训练模型")
         page.locator("#job-result").click()
@@ -212,19 +236,37 @@ def test_mocked_sportmonks_pipeline(tmp_path: Path, page: Page, monkeypatch: pyt
         expect(page.locator("#log")).to_contain_text("回测完成")
         page.locator("#job-result").click()
         expect(page.get_by_role("heading", name="回测结果")).to_be_visible()
-        expect(page.get_by_text("全场对数损失")).to_be_visible()
-        expect(page.get_by_text("历史频率基准")).to_be_visible()
-        _download_contains(page, "下载回测 CSV", "全场对数损失")
+        expect(page.locator("#football-metrics")).to_contain_text("全场对数损失")
+        expect(page.locator("#football-metrics")).to_contain_text("历史频率基准")
+        expect(page.locator("#track-metrics")).to_contain_text("纯市场")
+        expect(page.locator("#track-metrics")).to_contain_text("综合")
+        expect(page.locator("#promotion-reasons li")).to_have_count(3)
+        _download_contains(page, "下载回测 CSV", "common_market")
         _click_nav(page, "回测结果")
         document = _download_json(page, "下载回测 JSON")
         assert document["model"]["n"] > 0
         assert "baseline" in document
+        assert document["n_common"] > 0
+        assert set(document["promotion"]["markets"]) == {"ft", "ht", "scores"}
+        _click_nav(page, "数据状态")
+        expect(page.locator("#active-table tbody tr")).to_have_count(3)
+        expect(page.get_by_text("上次判定")).to_be_visible()
+
+        mock.set_mode("odds-403")
 
         _click_nav(page, "操作台")
         _submit(page, "预测下一轮", timeout=JOB_WAIT_MS)
+        expect(page.locator("#log")).to_contain_text("赔率不可用")
+        mock.set_mode("ok")
         page.locator("#job-result").click()
         expect(page.get_by_role("heading", name="预测结果")).to_be_visible()
         expect(page.locator(".demo-banner")).to_have_count(0)
+        expect(page.locator("#active-models")).to_contain_text("全场胜平负")
+        for label, view in (("纯市场", "market"), ("综合", "combined"), ("纯足球", "football"), ("启用模型", "active")):
+            page.get_by_role("navigation", name="模型").get_by_role("link", name=label).click()
+            expect(page.locator("#predictions-table")).to_have_attribute("data-view", view)
+            expect(page.locator("#predictions-table tbody tr")).to_have_count(3)
+            assert "缺赔率" not in page.locator("#predictions-table").inner_text()
         generated = page.locator("main").inner_text()
         assert "生成于" in generated
         assert "+00:00" not in generated
@@ -240,6 +282,8 @@ def test_mocked_sportmonks_pipeline(tmp_path: Path, page: Page, monkeypatch: pyt
         home_name = home.inner_text()
         away_name = away.inner_text()
         home.click()
+        expect(page.locator("#tracks-table tbody tr")).to_have_count(3)
+        expect(page.locator("#tracks-table")).to_contain_text("正确比分赔率")
         expect(page.locator("#ft-grid")).to_be_visible()
         expect(page.locator("#ht-grid")).to_be_visible()
         _assert_grid_sums(page, "#ft-grid")
@@ -256,6 +300,11 @@ def test_mocked_sportmonks_pipeline(tmp_path: Path, page: Page, monkeypatch: pyt
         assert payload["items"]
         assert payload["items"][0]["ft_matrix"]
         assert abs(sum(payload["items"][0]["ft"].values()) - 1) < 1e-6
+        for track in ("football", "market", "combined"):
+            body = payload["items"][0]["tracks"][track]
+            assert body["available"]
+            assert abs(sum(body["ft"].values()) - 1) < 1e-6
+        assert "market_ft_home" in csv_text
 
         _click_nav(page, "操作台")
         page.locator("input[name=start]").fill(day)
@@ -303,10 +352,16 @@ def test_demo_mode_is_labelled_and_refuses_network(tmp_path: Path, page: Page, m
         expect(page.get_by_text("上次训练截止")).to_be_visible()
 
         _click_nav(page, "操作台")
+        _submit(page, "更新赔率")
+        expect(page.locator("[role=alert]")).to_contain_text(DEMO_FETCH_MESSAGE[:12])
+        _click_nav(page, "操作台")
+
         _submit(page, "运行回测", timeout=JOB_WAIT_MS)
         page.locator("#job-result").click()
         _assert_demo_banner(page)
-        expect(page.get_by_text("全场对数损失")).to_be_visible()
+        expect(page.locator("#football-metrics")).to_contain_text("全场对数损失")
+        expect(page.locator("#track-metrics")).to_be_visible()
+        expect(page.locator("#promotion-reasons li")).to_have_count(3)
         _download_contains(page, "下载回测 CSV", "全场对数损失")
         _click_nav(page, "回测结果")
         _download_json(page, "下载回测 JSON")

@@ -18,6 +18,53 @@ class MatchStore:
         self.cache_dir = self.root / "cache"
         self.seasons_path = self.root / "processed" / "seasons.json"
         self.predictions_dir = self.root / "predictions"
+        self.odds_path = self.root / "processed" / "odds.csv"
+        self.ensemble_path = self.root / "models" / "combined.json"
+        self.active_path = self.root / "models" / "active.json"
+
+    def load_odds(self) -> pd.DataFrame:
+        from laliga.data.odds import ODDS_COLUMNS, empty_odds
+
+        if not self.odds_path.exists():
+            return empty_odds()
+        frame = pd.read_csv(self.odds_path, dtype={"label": str, "name": str, "total": str, "handicap": str})
+        for column in ODDS_COLUMNS:
+            if column not in frame.columns:
+                frame[column] = pd.NA
+        frame = frame[ODDS_COLUMNS].copy()
+        for column in ("fixture_id", "market_id", "bookmaker_id"):
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame["value"] = pd.to_numeric(frame["value"], errors="coerce")
+        frame = frame.dropna(subset=["fixture_id", "market_id", "bookmaker_id", "value"])
+        for column in ("fixture_id", "market_id", "bookmaker_id"):
+            frame[column] = frame[column].astype(int)
+        for column in ("label", "name", "total", "handicap", "latest_bookmaker_update"):
+            frame[column] = frame[column].fillna("").astype(str)
+        return frame.reset_index(drop=True)
+
+    def upsert_odds(self, frame: pd.DataFrame, fixture_ids: set[int]) -> pd.DataFrame:
+        """Replace every stored odd for ``fixture_ids`` with ``frame``."""
+
+        current = self.load_odds()
+        if not current.empty:
+            current = current[~current["fixture_id"].isin(fixture_ids)]
+        parts = [part for part in (current, frame) if not part.empty]
+        merged = pd.concat(parts, ignore_index=True) if parts else frame.iloc[0:0]
+        merged = merged.sort_values(["fixture_id", "market_id", "bookmaker_id"]).reset_index(drop=True)
+        self.odds_path.parent.mkdir(parents=True, exist_ok=True)
+        merged.to_csv(self.odds_path, index=False)
+        return merged
+
+    def save_json(self, path: Path, document: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(document, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(path)
+
+    def load_json(self, path: Path) -> dict | None:
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def load(self) -> pd.DataFrame:
         if not self.processed_path.exists():

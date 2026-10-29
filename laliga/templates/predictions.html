@@ -7,13 +7,27 @@
   <p class="empty">还没有预测。回到操作台，在本地已有未开赛比赛后点击「预测下一轮」或「按日期预测」。没有缓存时这里保持空白，不会显示示例比赛。</p>
   {% else %}
   <p class="muted">{{ payload.label }}。生成于 {{ created_label }}。{% if payload.note %}{{ payload.note }}{% endif %}</p>
+  {% if active %}
+  <p id="active-models">当前启用（按回测准确率自动选择）：{% for row in active %}{{ row.market }} = <strong>{{ row.track }}</strong>{% if not loop.last %}；{% endif %}{% endfor %}。<a href="{{ url_for('backtest_page') }}">查看判定依据</a></p>
+  {% endif %}
+  <nav class="tabs" aria-label="模型">
+    {% for name, label in views %}
+    <a href="{{ url_for('predictions', track=name) }}" class="{{ 'current' if name == view else '' }}" {% if name == view %}aria-current="page"{% endif %}>{{ label }}</a>
+    {% endfor %}
+  </nav>
+  <p class="muted">
+    {% if view == "active" %}每个市场用回测里胜出的那套模型。带 * 的格子：启用的模型这场缺赔率，改用纯足球。
+    {% elif view == "football" %}纯足球：Dixon–Coles 进球模型，只用历史比分。
+    {% elif view == "market" %}纯市场：博彩公司赔率去掉抽水（Shin 方法）后的概率，多家取平均。
+    {% else %}综合：纯足球与纯市场的对数意见池，权重按回测对数损失拟合。{% endif %}
+  </p>
   <p>
     <a href="{{ url_for('download_predictions_csv') }}">下载预测 CSV</a>
     ·
     <a href="{{ url_for('download_predictions_json') }}">下载预测 JSON</a>
   </p>
   <div class="wrap">
-    <table>
+    <table id="predictions-table" data-view="{{ view }}">
       <thead>
         <tr>
           <th>开球 UTC</th>
@@ -33,20 +47,28 @@
       </thead>
       <tbody>
         {% for item in items %}
+        {% set shown = item.shown %}
         <tr>
           <td>{{ item.utc }}</td>
           <td>{{ item.singapore }}</td>
           <td><a href="{{ url_for('fixture_detail', fixture_id=item.fixture_id) }}">{{ item.home_team }}</a></td>
           <td><a href="{{ url_for('fixture_detail', fixture_id=item.fixture_id) }}">{{ item.away_team }}</a></td>
-          <td>{{ '%.1f'|format(item.ft.home * 100) }}%</td>
-          <td>{{ '%.1f'|format(item.ft.draw * 100) }}%</td>
-          <td>{{ '%.1f'|format(item.ft.away * 100) }}%</td>
-          <td>{{ '%.1f'|format(item.ht.home * 100) }}%</td>
-          <td>{{ '%.1f'|format(item.ht.draw * 100) }}%</td>
-          <td>{{ '%.1f'|format(item.ht.away * 100) }}%</td>
-          {% for score in item.top_scores %}
-          <td>{{ score.home_goals }}-{{ score.away_goals }} {{ '%.1f'|format(score.probability * 100) }}%</td>
+          {% if shown.available %}
+          {% set ft_mark = "*" if shown.fallback.ft else "" %}
+          {% set ht_mark = "*" if shown.fallback.ht else "" %}
+          {% set score_mark = "*" if shown.fallback.scores else "" %}
+          <td>{{ '%.1f'|format(shown.ft.home * 100) }}%{{ ft_mark }}</td>
+          <td>{{ '%.1f'|format(shown.ft.draw * 100) }}%{{ ft_mark }}</td>
+          <td>{{ '%.1f'|format(shown.ft.away * 100) }}%{{ ft_mark }}</td>
+          <td>{{ '%.1f'|format(shown.ht.home * 100) }}%{{ ht_mark }}</td>
+          <td>{{ '%.1f'|format(shown.ht.draw * 100) }}%{{ ht_mark }}</td>
+          <td>{{ '%.1f'|format(shown.ht.away * 100) }}%{{ ht_mark }}</td>
+          {% for score in shown.top_scores %}
+          <td>{{ score.home_goals }}-{{ score.away_goals }} {{ '%.1f'|format(score.probability * 100) }}%{{ score_mark }}</td>
           {% endfor %}
+          {% else %}
+          <td colspan="9" class="muted">缺赔率：{{ (shown.notes or ["这场比赛没有可用赔率。"]) | join(' ') }}</td>
+          {% endif %}
         </tr>
         {% endfor %}
       </tbody>

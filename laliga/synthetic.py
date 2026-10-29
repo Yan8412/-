@@ -81,6 +81,158 @@ def generate_synthetic_fixtures(seed: int = 7, today: date | None = None) -> lis
     return fixtures
 
 
+def generate_synthetic_odds(fixtures: list[dict[str, Any]], seed: int = 11) -> list[dict[str, Any]]:
+    """SportMonks-shaped pre-match odd rows for synthetic fixtures (demo and tests only).
+
+    Prices come from the same attack/defence process as the goals, with a
+    shared "market view" error, a small per-bookmaker error, and a margin.
+    Bookmaker 2 uses ``1/X/2`` labels, a Half Time Result market and
+    home–away correct scores with an "Any Other Score" line. Bookmaker 34
+    uses ``Home/Draw/Away``, a Half Time/Full Time market instead of Half
+    Time Result, and winner-first correct scores (``name`` = side).
+    ``winning`` is filled for finished matches the way the live API does;
+    the program must never read it.
+    """
+
+    from laliga.model.dixon_coles import outcome_probabilities, score_matrix
+
+    rng = np.random.default_rng(seed)
+    rows: list[dict[str, Any]] = []
+    next_id = 1
+    for fixture in fixtures:
+        home_id, away_id = _side_ids(fixture)
+        lam_home = float(np.exp(MU + HOME + ATTACK[home_id] - DEFENCE[away_id]))
+        lam_away = float(np.exp(MU + ATTACK[away_id] - DEFENCE[home_id]))
+        shift = rng.normal(0.0, 0.06, size=2)
+        view_home = lam_home * float(np.exp(shift[0]))
+        view_away = lam_away * float(np.exp(shift[1]))
+        result = _synthetic_result(fixture)
+        kickoff = str(fixture["starting_at"])
+        for bookmaker, margin in ((2, 0.06), (34, 0.045)):
+            own = rng.normal(0.0, 0.02, size=2)
+            book_home = view_home * float(np.exp(own[0]))
+            book_away = view_away * float(np.exp(own[1]))
+            ft_grid = score_matrix(book_home, book_away, 0.0, 10)
+            ht_grid = score_matrix(book_home * HT_SHARE, book_away * HT_SHARE, 0.0, 10)
+            ft = outcome_probabilities(ft_grid)
+            ht = outcome_probabilities(ht_grid)
+            labels = ("1", "X", "2") if bookmaker == 2 else ("Home", "Draw", "Away")
+            for index, probability in enumerate(ft):
+                rows.append(_odd(next_id, fixture, 1, bookmaker, labels[index], labels[index], probability, margin, kickoff, result and result["ft"] == index))
+                next_id += 1
+            if bookmaker == 2:
+                for index, probability in enumerate(ht):
+                    rows.append(_odd(next_id, fixture, 31, bookmaker, labels[index], labels[index], probability, margin, kickoff, result and result["ht"] == index))
+                    next_id += 1
+            else:
+                for half in range(3):
+                    for full in range(3):
+                        probability = _htft_probability(ht_grid, book_home, book_away, half, full)
+                        label = f"{labels[half]}/{labels[full]}"
+                        hit = bool(result) and result["ht"] == half and result["ft"] == full
+                        rows.append(_odd(next_id, fixture, 29, bookmaker, label, label, probability, margin * 2, kickoff, hit))
+                        next_id += 1
+            listed = 0.0
+            for home_goals in range(5):
+                for away_goals in range(5):
+                    probability = float(ft_grid[home_goals, away_goals])
+                    listed += probability
+                    hit = bool(result) and result["score"] == (home_goals, away_goals)
+                    if bookmaker == 2:
+                        label = name = f"{home_goals}:{away_goals}"
+                    else:
+                        side = "Home" if home_goals > away_goals else "Away" if home_goals < away_goals else "Draw"
+                        high, low = max(home_goals, away_goals), min(home_goals, away_goals)
+                        label, name = f"{high}-{low}", side
+                    rows.append(_odd(next_id, fixture, 57, bookmaker, label, name, probability, margin * 3, kickoff, hit))
+                    next_id += 1
+            if bookmaker == 2:
+                hit = bool(result) and max(result["score"]) > 4
+                rows.append(_odd(next_id, fixture, 57, bookmaker, "Any Other Score", "Any Other Score", max(1.0 - listed, 1e-4), margin * 3, kickoff, hit))
+                next_id += 1
+    return rows
+
+
+def _side_ids(fixture: dict[str, Any]) -> tuple[int, int]:
+    located = {item["meta"]["location"]: int(item["id"]) for item in fixture["participants"]}
+    return located["home"], located["away"]
+
+
+def _synthetic_result(fixture: dict[str, Any]) -> dict[str, Any] | None:
+    goals: dict[str, dict[str, int]] = {}
+    for row in fixture.get("scores") or []:
+        goals.setdefault(row["description"], {})[row["score"]["participant"]] = int(row["score"]["goals"])
+    ft = goals.get("2ND_HALF")
+    ht = goals.get("1ST_HALF")
+    if not ft or not ht:
+        return None
+
+    def outcome(pair: dict[str, int]) -> int:
+        return 0 if pair["home"] > pair["away"] else 1 if pair["home"] == pair["away"] else 2
+
+    return {"ft": outcome(ft), "ht": outcome(ht), "score": (ft["home"], ft["away"])}
+
+
+def _htft_probability(ht_grid, lam_home: float, lam_away: float, half: int, full: int) -> float:
+    """P(half-time outcome, full-time outcome) when second-half goals are independent Poisson."""
+
+    from laliga.model.dixon_coles import score_matrix
+
+    second = score_matrix(lam_home * (1 - HT_SHARE), lam_away * (1 - HT_SHARE), 0.0, 10)
+    ht_diff = _goal_difference(ht_grid)
+    span = ht_grid.shape[0] - 1
+    differences = np.arange(-span, span + 1)
+    keep = {0: differences > 0, 1: differences == 0, 2: differences < 0}[half]
+    ft_diff = np.convolve(np.where(keep, ht_diff, 0.0), _goal_difference(second))
+    ft_differences = np.arange(-2 * span, 2 * span + 1)
+    wanted = {0: ft_differences > 0, 1: ft_differences == 0, 2: ft_differences < 0}[full]
+    return max(float(ft_diff[wanted].sum()), 1e-4)
+
+
+def _goal_difference(grid) -> np.ndarray:
+    size = grid.shape[0]
+    distribution = np.zeros(2 * size - 1)
+    for offset in range(-(size - 1), size):
+        distribution[offset + size - 1] = float(np.trace(grid, offset=-offset))
+    return distribution
+
+
+def _odd(
+    odd_id: int,
+    fixture: dict[str, Any],
+    market_id: int,
+    bookmaker_id: int,
+    label: str,
+    name: str,
+    probability: float,
+    margin: float,
+    kickoff: str,
+    winning: bool | None,
+) -> dict[str, Any]:
+    price = max(1.01, round(1.0 / (max(probability, 1e-4) * (1.0 + margin)), 2))
+    descriptions = {1: "Fulltime Result", 29: "Half Time/Full Time", 31: "Half Time Result", 57: "Correct Score"}
+    updated = (datetime.fromisoformat(kickoff) - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
+    return {
+        "id": odd_id,
+        "fixture_id": fixture["id"],
+        "market_id": market_id,
+        "bookmaker_id": bookmaker_id,
+        "label": label,
+        "value": f"{price:.2f}",
+        "name": name,
+        "sort_order": None,
+        "market_description": descriptions[market_id],
+        "probability": f"{100.0 / price:.2f}%",
+        "dp3": f"{price:.3f}",
+        "winning": bool(winning),
+        "stopped": False,
+        "total": None,
+        "handicap": None,
+        "participants": None,
+        "latest_bookmaker_update": updated,
+    }
+
+
 def double_round_robin(team_ids: list[int]) -> list[list[tuple[int, int]]]:
     """Home-and-away round robin. Each pair meets twice, once at each ground."""
 

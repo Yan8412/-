@@ -155,3 +155,18 @@ pre.log {
   padding: 12px;
   min-height: 3em;
 }
+
+nav.tabs { max-width: none; margin: 10px 0 4px; padding: 0; gap: 6px; flex-wrap: wrap; }
+nav.tabs a {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: white;
+  font-weight: 600;
+}
+nav.tabs a.current { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+
+.panel h3 { margin: 16px 0 6px; font-size: 16px; }
+
+#promotion-reasons { padding-left: 20px; }
+#promotion-reasons li { margin-bottom: 6px; }

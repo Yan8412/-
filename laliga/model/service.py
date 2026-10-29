@@ -218,6 +218,16 @@ def _finished_before(matches: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame
     return frame[frame["starting_at"] < as_of]
 
 
+def league_ht_ratio(matches: pd.DataFrame) -> float:
+    """Share of full-time goals scored before the break, over finished matches."""
+
+    finished = matches
+    if "status" in finished.columns:
+        finished = finished[finished["status"] == "finished"]
+    finished = finished.dropna(subset=["home_goals_ft", "away_goals_ft"])
+    return _ht_ratio(finished.dropna(subset=["home_goals_ht", "away_goals_ht"]), finished)
+
+
 def _ht_ratio(ht_rows: pd.DataFrame, finished: pd.DataFrame) -> float:
     if ht_rows.empty:
         return DEFAULT_HT_GOAL_RATIO
